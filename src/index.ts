@@ -637,12 +637,35 @@ async function main(): Promise<void> {
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
-      // Remote control commands — intercept before storage
+      // Slash commands — intercept before storage
       const trimmed = msg.content.trim();
       if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
         handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
           logger.error({ err, chatJid }, 'Remote control command error'),
         );
+        return;
+      }
+
+      // /clear — reset the agent session for this group
+      if (trimmed === '/clear') {
+        const group = registeredGroups[chatJid];
+        if (group) {
+          const had = !!sessions[group.folder];
+          delete sessions[group.folder];
+          deleteSession(group.folder);
+          logger.info({ group: group.name }, 'Session cleared via /clear');
+          const ch = findChannel(channels, chatJid);
+          if (ch) {
+            ch.sendMessage(
+              chatJid,
+              had
+                ? 'Session cleared. Next message starts a fresh conversation.'
+                : 'No active session. Next message starts a fresh conversation.',
+            ).catch((err) =>
+              logger.error({ err, chatJid }, '/clear reply error'),
+            );
+          }
+        }
         return;
       }
 

@@ -24,14 +24,21 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install agent-browser, claude-code, and obsidian-mcp-server globally
+RUN npm install -g agent-browser @anthropic-ai/claude-code obsidian-mcp-server
+
+# obsidian-mcp-server insists on writing logs inside its own package dir.
+# Pre-create with world-writable perms so the non-root agent user can use it.
+# Otherwise the server exits silently with code 1 when started by a non-root user.
+RUN mkdir -p /usr/local/lib/node_modules/obsidian-mcp-server/logs \
+    && chmod 1777 /usr/local/lib/node_modules/obsidian-mcp-server/logs
 
 # Create app directory
 WORKDIR /app

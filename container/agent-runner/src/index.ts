@@ -20,6 +20,7 @@ import { execFile } from 'child_process';
 import {
   query,
   HookCallback,
+  McpServerConfig,
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
@@ -412,16 +413,13 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
-  // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
-  }
-
-  // Discover additional directories mounted at /workspace/extra/*
-  // These are passed to the SDK so their CLAUDE.md files are loaded automatically
+  // Discover additional directories whose CLAUDE.md should be loaded.
+  // /workspace/global — shared context across all groups (always included)
+  // /workspace/extra/* — per-group additional mounts
   const extraDirs: string[] = [];
+  if (fs.existsSync('/workspace/global')) {
+    extraDirs.push('/workspace/global');
+  }
   const extraBase = '/workspace/extra';
   if (fs.existsSync(extraBase)) {
     for (const entry of fs.readdirSync(extraBase)) {
@@ -435,20 +433,52 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  // Build mcpServers config dynamically so we can register optional servers
+  // (like Obsidian) only when their credentials are present.
+  const mcpServers: Record<string, McpServerConfig> = {
+    nanoclaw: {
+      command: 'node',
+      args: [mcpServerPath],
+      env: {
+        NANOCLAW_CHAT_JID: containerInput.chatJid,
+        NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+        NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+      },
+    },
+  };
+
+  if (process.env.OBSIDIAN_API_KEY) {
+    log(
+      `Obsidian MCP: registering server (base=${process.env.OBSIDIAN_BASE_URL || 'default'})`,
+    );
+    // The container inherits HTTP(S)_PROXY pointing at the OneCLI gateway so
+    // Anthropic API traffic gets credential injection. Obsidian's Local REST
+    // API runs on the same host (host.docker.internal) and must NOT be routed
+    // through that proxy — the gateway returns 400 for unknown hosts. Bypass
+    // the proxy for the loopback host so axios talks directly to Obsidian.
+    mcpServers.obsidian = {
+      command: 'node',
+      args: ['/usr/local/lib/node_modules/obsidian-mcp-server/dist/index.js'],
+      env: {
+        OBSIDIAN_API_KEY: process.env.OBSIDIAN_API_KEY,
+        OBSIDIAN_BASE_URL:
+          process.env.OBSIDIAN_BASE_URL || 'https://host.docker.internal:27124',
+        OBSIDIAN_VERIFY_SSL: process.env.OBSIDIAN_VERIFY_SSL || 'false',
+        NO_PROXY: 'host.docker.internal,127.0.0.1,localhost',
+        no_proxy: 'host.docker.internal,127.0.0.1,localhost',
+      },
+    };
+  }
+
   for await (const message of query({
     prompt: stream,
     options: {
       cwd: '/workspace/group',
+      model: 'claude-sonnet-4-6',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? {
-            type: 'preset' as const,
-            preset: 'claude_code' as const,
-            append: globalClaudeMd,
-          }
-        : undefined,
+      systemPrompt: undefined,
       allowedTools: [
         'Bash',
         'Read',
@@ -469,22 +499,13 @@ async function runQuery(
         'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
+        'mcp__obsidian__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-          },
-        },
-      },
+      mcpServers,
       hooks: {
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },

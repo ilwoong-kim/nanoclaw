@@ -16,6 +16,7 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -251,6 +252,41 @@ async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Forward Obsidian Local REST API credentials when configured.
+  // The obsidian-mcp-server runs inside the container and reads these from
+  // its own process env. We use readEnvFile (not process.env) to keep the
+  // pattern consistent with other secrets — values stay out of the host
+  // process environment unless explicitly handed off here.
+  const obsidianEnv = readEnvFile(['OBSIDIAN_API_KEY', 'OBSIDIAN_BASE_URL']);
+  if (obsidianEnv.OBSIDIAN_API_KEY) {
+    args.push('-e', `OBSIDIAN_API_KEY=${obsidianEnv.OBSIDIAN_API_KEY}`);
+    args.push(
+      '-e',
+      `OBSIDIAN_BASE_URL=${obsidianEnv.OBSIDIAN_BASE_URL || 'https://host.docker.internal:27124'}`,
+    );
+    // Local REST API uses a self-signed cert; the MCP server needs to skip verification.
+    args.push('-e', 'OBSIDIAN_VERIFY_SSL=false');
+  }
+
+  // Forward Atlassian credentials for the atlassian container skill.
+  // The Python script reads these env vars when macOS Keychain is unavailable.
+  const atlassianEnv = readEnvFile([
+    'ATLASSIAN_DOMAIN',
+    'ATLASSIAN_EMAIL',
+    'ATLASSIAN_API_TOKEN',
+  ]);
+  if (atlassianEnv.ATLASSIAN_DOMAIN) {
+    args.push('-e', `ATLASSIAN_DOMAIN=${atlassianEnv.ATLASSIAN_DOMAIN}`);
+    args.push('-e', `ATLASSIAN_EMAIL=${atlassianEnv.ATLASSIAN_EMAIL}`);
+    args.push('-e', `ATLASSIAN_API_TOKEN=${atlassianEnv.ATLASSIAN_API_TOKEN}`);
+  }
+
+  // Forward Slack user token for the slack-reader container skill.
+  const slackUserEnv = readEnvFile(['SLACK_USER_TOKEN']);
+  if (slackUserEnv.SLACK_USER_TOKEN) {
+    args.push('-e', `SLACK_USER_TOKEN=${slackUserEnv.SLACK_USER_TOKEN}`);
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.

@@ -19,6 +19,7 @@ interface GroupState {
   idleWaiting: boolean;
   isTaskContainer: boolean;
   runningTaskId: string | null;
+  activeThreadId: string | null;
   pendingMessages: boolean;
   pendingTasks: QueuedTask[];
   process: ChildProcess | null;
@@ -43,6 +44,7 @@ export class GroupQueue {
         idleWaiting: false,
         isTaskContainer: false,
         runningTaskId: null,
+        activeThreadId: null,
         pendingMessages: false,
         pendingTasks: [],
         process: null,
@@ -134,11 +136,13 @@ export class GroupQueue {
     proc: ChildProcess,
     containerName: string,
     groupFolder?: string,
+    threadId?: string,
   ): void {
     const state = this.getGroup(groupJid);
     state.process = proc;
     state.containerName = containerName;
     if (groupFolder) state.groupFolder = groupFolder;
+    state.activeThreadId = threadId ?? null;
   }
 
   /**
@@ -157,9 +161,13 @@ export class GroupQueue {
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
    */
-  sendMessage(groupJid: string, text: string): boolean {
+  sendMessage(groupJid: string, text: string, threadId?: string): boolean {
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
+      return false;
+    // Prevent cross-thread piping: only pipe if the active container
+    // is serving the same thread (or both are non-threaded)
+    if ((state.activeThreadId || undefined) !== (threadId || undefined))
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
 
@@ -239,6 +247,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.activeThreadId = null;
       this.activeCount--;
       this.drainGroup(groupJid);
     }
@@ -265,6 +274,7 @@ export class GroupQueue {
       state.active = false;
       state.isTaskContainer = false;
       state.runningTaskId = null;
+      state.activeThreadId = null;
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;

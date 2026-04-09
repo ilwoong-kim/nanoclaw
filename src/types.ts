@@ -93,6 +93,9 @@ export interface Channel {
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: set active thread context for threaded channels (e.g., Slack).
+  // Called before sendMessage/setTyping so responses go to the correct thread.
+  setThreadContext?(jid: string, threadId: string | undefined): void;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
 }

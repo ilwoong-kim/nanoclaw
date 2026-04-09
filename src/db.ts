@@ -157,6 +157,13 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Add thread_id column for thread-based session isolation (Slack threads)
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -285,7 +292,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -298,6 +305,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_message_id ?? null,
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
+    msg.thread_id ?? null,
   );
 }
 
@@ -313,9 +321,10 @@ export function storeMessageDirect(msg: {
   timestamp: string;
   is_from_me: boolean;
   is_bot_message?: boolean;
+  thread_id?: string;
 }): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -325,6 +334,7 @@ export function storeMessageDirect(msg: {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.thread_id ?? null,
   );
 }
 
@@ -343,7 +353,8 @@ export function getNewMessages(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name,
+             thread_id
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -370,37 +381,46 @@ export function getMessagesSince(
   sinceTimestamp: string,
   botPrefix: string,
   limit: number = 200,
+  threadId?: string,
 ): NewMessage[] {
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   // Subquery takes the N most recent, outer query re-sorts chronologically.
+  const threadFilter = threadId ? `AND thread_id = ?` : '';
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name,
+             thread_id
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
         AND content != '' AND content IS NOT NULL
+        ${threadFilter}
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
   `;
-  return db
-    .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+  const params: unknown[] = [chatJid, sinceTimestamp, `${botPrefix}:%`];
+  if (threadId) params.push(threadId);
+  params.push(limit);
+  return db.prepare(sql).all(...params) as NewMessage[];
 }
 
 export function getLastBotMessageTimestamp(
   chatJid: string,
   botPrefix: string,
+  threadId?: string,
 ): string | undefined {
-  const row = db
-    .prepare(
-      `SELECT MAX(timestamp) as ts FROM messages
-       WHERE chat_jid = ? AND (is_bot_message = 1 OR content LIKE ?)`,
-    )
-    .get(chatJid, `${botPrefix}:%`) as { ts: string | null } | undefined;
+  const threadFilter = threadId ? `AND thread_id = ?` : '';
+  const sql = `SELECT MAX(timestamp) as ts FROM messages
+       WHERE chat_jid = ? AND (is_bot_message = 1 OR content LIKE ?)
+       ${threadFilter}`;
+  const params: unknown[] = [chatJid, `${botPrefix}:%`];
+  if (threadId) params.push(threadId);
+  const row = db.prepare(sql).get(...params) as
+    | { ts: string | null }
+    | undefined;
   return row?.ts ?? undefined;
 }
 

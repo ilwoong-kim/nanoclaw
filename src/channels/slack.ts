@@ -35,12 +35,14 @@ export class SlackChannel implements Channel {
   private app: App;
   private botUserId: string | undefined;
   private connected = false;
-  private outgoingQueue: Array<{ jid: string; text: string }> = [];
+  private outgoingQueue: Array<{ jid: string; text: string; threadTs?: string }> = [];
   private flushing = false;
   private userNameCache = new Map<string, string>();
   private pendingRegistrations = new Set<string>();
   /** Stores the ts of a placeholder message per channel, so sendMessage can update it. */
   private placeholderTs = new Map<string, string>();
+  /** Active thread_ts per channel — responses go into this thread */
+  private activeThreadTs = new Map<string, string>();
 
   private opts: SlackChannelOpts;
 
@@ -83,10 +85,6 @@ export class SlackChannel implements Channel {
 
       if (!msg.text) return;
 
-      // Threaded replies are flattened into the channel conversation.
-      // The agent sees them alongside channel-level messages; responses
-      // always go to the channel, not back into the thread.
-
       const jid = `slack:${msg.channel}`;
       const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
       const isGroup = msg.channel_type !== 'im';
@@ -120,7 +118,10 @@ export class SlackChannel implements Channel {
           isMain: false,
         });
         this.pendingRegistrations.delete(jid);
-        logger.info({ jid, folder: folderName, isDm, channelName }, 'Auto-registered Slack channel on bot mention');
+        logger.info(
+          { jid, folder: folderName, isDm, channelName },
+          'Auto-registered Slack channel on bot mention',
+        );
       }
 
       const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
@@ -139,15 +140,26 @@ export class SlackChannel implements Channel {
       // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
       // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
       let content = msg.text;
-      if (this.botUserId && !isBotMessage) {
-        const mentionPattern = `<@${this.botUserId}>`;
-        if (
-          content.includes(mentionPattern) &&
-          !TRIGGER_PATTERN.test(content)
-        ) {
+      const isBotMentionedHere =
+        !!this.botUserId &&
+        !isBotMessage &&
+        msg.text.includes(`<@${this.botUserId}>`);
+      if (isBotMentionedHere) {
+        if (!TRIGGER_PATTERN.test(content)) {
           content = `@${ASSISTANT_NAME} ${content}`;
         }
+        // Thread context is set by index.ts via setThreadContext before
+        // sendMessage/setTyping — not here, to avoid race conditions when
+        // multiple threads trigger concurrently.
       }
+
+      // thread_id for session isolation:
+      // - In a thread: msg.thread_ts (parent message ts)
+      // - Top-level bot mention in group: msg.ts (starts new thread)
+      // - Otherwise: undefined (channel-level, no thread isolation)
+      const threadId = isGroup
+        ? msg.thread_ts || (isBotMentionedHere ? msg.ts : undefined)
+        : undefined;
 
       this.opts.onMessage(jid, {
         id: msg.ts,
@@ -158,6 +170,7 @@ export class SlackChannel implements Channel {
         timestamp,
         is_from_me: isBotMessage,
         is_bot_message: isBotMessage,
+        thread_id: threadId,
       });
     });
   }
@@ -187,9 +200,10 @@ export class SlackChannel implements Channel {
 
   async sendMessage(jid: string, text: string): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
+    const threadTs = this.activeThreadTs.get(jid);
 
     if (!this.connected) {
-      this.outgoingQueue.push({ jid, text });
+      this.outgoingQueue.push({ jid, text, threadTs });
       logger.info(
         { jid, queueSize: this.outgoingQueue.length },
         'Slack disconnected, message queued',
@@ -201,7 +215,8 @@ export class SlackChannel implements Channel {
       const placeholderTs = this.placeholderTs.get(jid);
 
       if (placeholderTs && text.length <= MAX_MESSAGE_LENGTH) {
-        // Replace the placeholder with the first response chunk
+        // Replace the placeholder with the first response chunk.
+        // chat.update keeps the message in its original thread, so no thread_ts needed.
         this.placeholderTs.delete(jid);
         await this.app.client.chat.update({
           channel: channelId,
@@ -212,24 +227,31 @@ export class SlackChannel implements Channel {
         // If placeholder was used, delete it before sending split messages
         if (placeholderTs) {
           this.placeholderTs.delete(jid);
-          await this.app.client.chat.delete({ channel: channelId, ts: placeholderTs }).catch(() => {});
+          await this.app.client.chat
+            .delete({ channel: channelId, ts: placeholderTs })
+            .catch(() => {});
         }
         // Slack limits messages to ~4000 characters; split if needed
         if (text.length <= MAX_MESSAGE_LENGTH) {
-          await this.app.client.chat.postMessage({ channel: channelId, text });
+          await this.app.client.chat.postMessage({
+            channel: channelId,
+            text,
+            ...(threadTs && { thread_ts: threadTs }),
+          });
         } else {
           for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
             await this.app.client.chat.postMessage({
               channel: channelId,
               text: text.slice(i, i + MAX_MESSAGE_LENGTH),
+              ...(threadTs && { thread_ts: threadTs }),
             });
           }
         }
       }
-      logger.info({ jid, length: text.length }, 'Slack message sent');
+      logger.info({ jid, length: text.length, threadTs }, 'Slack message sent');
     } catch (err) {
       this.placeholderTs.delete(jid);
-      this.outgoingQueue.push({ jid, text });
+      this.outgoingQueue.push({ jid, text, threadTs });
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
@@ -245,6 +267,14 @@ export class SlackChannel implements Channel {
     return jid.startsWith('slack:');
   }
 
+  setThreadContext(jid: string, threadId: string | undefined): void {
+    if (threadId) {
+      this.activeThreadTs.set(jid, threadId);
+    } else {
+      this.activeThreadTs.delete(jid);
+    }
+  }
+
   async disconnect(): Promise<void> {
     this.connected = false;
     await this.app.stop();
@@ -252,11 +282,13 @@ export class SlackChannel implements Channel {
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
+    const threadTs = this.activeThreadTs.get(jid);
     if (isTyping) {
       try {
         const res = await this.app.client.chat.postMessage({
           channel: channelId,
           text: ':meat_on_bone::dash: ゴムゴムの〜 ...',
+          ...(threadTs && { thread_ts: threadTs }),
         });
         if (res.ts) this.placeholderTs.set(jid, res.ts);
       } catch (err) {
@@ -312,7 +344,9 @@ export class SlackChannel implements Channel {
 
   private async resolveChannelName(channelId: string): Promise<string> {
     try {
-      const result = await this.app.client.conversations.info({ channel: channelId });
+      const result = await this.app.client.conversations.info({
+        channel: channelId,
+      });
       return result.channel?.name
         ? `Slack #${result.channel.name}`
         : `Slack #${channelId}`;
@@ -352,6 +386,7 @@ export class SlackChannel implements Channel {
         await this.app.client.chat.postMessage({
           channel: channelId,
           text: item.text,
+          ...(item.threadTs && { thread_ts: item.threadTs }),
         });
         logger.info(
           { jid: item.jid, length: item.text.length },

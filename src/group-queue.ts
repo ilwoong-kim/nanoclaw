@@ -193,6 +193,19 @@ export class GroupQueue {
     }
   }
 
+  /**
+   * Force-clear the group state so the next message spawns a new container.
+   * The old container will still wind down via _close sentinel.
+   * Note: activeCount is NOT decremented here — runForGroup/runTask's finally
+   * block handles that when the container actually exits.
+   */
+  clearSession(groupJid: string): void {
+    this.closeStdin(groupJid);
+    const state = this.getGroup(groupJid);
+    state.idleWaiting = false;
+    state.groupFolder = null;
+  }
+
   private async runForGroup(
     groupJid: string,
     reason: 'messages' | 'drain',

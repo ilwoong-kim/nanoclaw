@@ -5,6 +5,7 @@ import { OneCLI } from '@onecli-sh/sdk';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -653,6 +654,14 @@ async function main(): Promise<void> {
           const had = !!sessions[group.folder];
           delete sessions[group.folder];
           deleteSession(group.folder);
+          queue.clearSession(chatJid);
+
+          // Purge Claude SDK session files so the next container starts truly fresh
+          const sdkSessionsDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude', 'sessions');
+          const sdkProjectsDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude', 'projects');
+          fs.rmSync(sdkSessionsDir, { recursive: true, force: true });
+          fs.rmSync(sdkProjectsDir, { recursive: true, force: true });
+
           logger.info({ group: group.name }, 'Session cleared via /clear');
           const ch = findChannel(channels, chatJid);
           if (ch) {

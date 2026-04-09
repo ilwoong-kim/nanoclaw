@@ -53,7 +53,7 @@ Files you create are saved in `/workspace/group/`. Use this for notes, research,
 
 ## Memory
 
-The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
+The `conversations/` folder contains searchable history of past conversations. Only read these files when the user explicitly asks to recall or search past conversations — never proactively reference them.
 
 When you learn something important:
 - Create files for structured data (e.g., `customers.md`, `preferences.md`)

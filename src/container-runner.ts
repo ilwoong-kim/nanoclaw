@@ -288,6 +288,12 @@ async function buildContainerArgs(
     args.push('-e', `SLACK_USER_TOKEN=${slackUserEnv.SLACK_USER_TOKEN}`);
   }
 
+  // Forward GitHub token for the github container skill.
+  const githubEnv = readEnvFile(['GITHUB_TOKEN']);
+  if (githubEnv.GITHUB_TOKEN) {
+    args.push('-e', `GITHUB_TOKEN=${githubEnv.GITHUB_TOKEN}`);
+  }
+
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
   const onecliApplied = await onecli.applyContainerConfig(args, {

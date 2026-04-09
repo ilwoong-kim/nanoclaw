@@ -192,6 +192,8 @@ result = api_request(token, "POST", "/repos/owner/repo/issues", body={"title": "
 | Repo | Purpose | Tech |
 |------|---------|------|
 | `Quantit-Github/arkraft-api` | Arkraft 백엔드 API — 리서치 워크플로우, 알파 풀, 디스커버리 세션 관리 | FastAPI, SQLAlchemy 2.0, Celery, PostgreSQL, Redis, Cognito JWT |
+| `Quantit-Github/arkraft-web` | Arkraft 프론트엔드 웹 애플리케이션 | — |
+| `Quantit-Github/arkraft-wiki` | Arkraft 제품 위키 — 서비스 비전, 철학, 온톨로지, 아키텍처 등 최상위 추상화 문서 (높은 중요도) | — |
 | `Quantit-Github/arkraft-deploy` | K8s 배포 — Helm charts + ArgoCD (web/api/agents) | Helm, ArgoCD, Istio, AWS ALB |
 | `Quantit-Github/ai-infra` | AI 인프라 IaC — VPC, EKS, ArgoCD, Argo Workflows, Monitoring | Terraform, Atlantis, kube-prometheus-stack |
 

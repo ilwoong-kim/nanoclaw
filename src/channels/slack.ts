@@ -26,6 +26,7 @@ export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  registerGroup: (jid: string, group: RegisteredGroup) => void;
 }
 
 export class SlackChannel implements Channel {
@@ -37,6 +38,9 @@ export class SlackChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private userNameCache = new Map<string, string>();
+  private pendingRegistrations = new Set<string>();
+  /** Stores the ts of a placeholder message per channel, so sendMessage can update it. */
+  private placeholderTs = new Map<string, string>();
 
   private opts: SlackChannelOpts;
 
@@ -90,9 +94,34 @@ export class SlackChannel implements Channel {
       // Always report metadata for group discovery
       this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
 
-      // Only deliver full messages for registered groups
+      // Only deliver full messages for registered groups.
+      // If the channel is not registered but the bot was @mentioned (or it's a DM),
+      // auto-register so users can invoke the bot from any channel it's been invited to.
       const groups = this.opts.registeredGroups();
-      if (!groups[jid]) return;
+      if (!groups[jid]) {
+        const isBotMentioned =
+          this.botUserId && msg.text.includes(`<@${this.botUserId}>`);
+        const isDm = msg.channel_type === 'im';
+        if (!isBotMentioned && !isDm) return;
+
+        if (this.pendingRegistrations.has(jid)) return;
+        this.pendingRegistrations.add(jid);
+
+        const folderName = `slack_${msg.channel}`;
+        const channelName = isDm
+          ? 'Slack DM'
+          : await this.resolveChannelName(msg.channel);
+        this.opts.registerGroup(jid, {
+          name: channelName,
+          folder: folderName,
+          trigger: `@${ASSISTANT_NAME}`,
+          added_at: new Date().toISOString(),
+          requiresTrigger: !isDm,
+          isMain: false,
+        });
+        this.pendingRegistrations.delete(jid);
+        logger.info({ jid, folder: folderName, isDm, channelName }, 'Auto-registered Slack channel on bot mention');
+      }
 
       const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
 
@@ -169,19 +198,37 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      // Slack limits messages to ~4000 characters; split if needed
-      if (text.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({ channel: channelId, text });
+      const placeholderTs = this.placeholderTs.get(jid);
+
+      if (placeholderTs && text.length <= MAX_MESSAGE_LENGTH) {
+        // Replace the placeholder with the first response chunk
+        this.placeholderTs.delete(jid);
+        await this.app.client.chat.update({
+          channel: channelId,
+          ts: placeholderTs,
+          text,
+        });
       } else {
-        for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
-          await this.app.client.chat.postMessage({
-            channel: channelId,
-            text: text.slice(i, i + MAX_MESSAGE_LENGTH),
-          });
+        // If placeholder was used, delete it before sending split messages
+        if (placeholderTs) {
+          this.placeholderTs.delete(jid);
+          await this.app.client.chat.delete({ channel: channelId, ts: placeholderTs }).catch(() => {});
+        }
+        // Slack limits messages to ~4000 characters; split if needed
+        if (text.length <= MAX_MESSAGE_LENGTH) {
+          await this.app.client.chat.postMessage({ channel: channelId, text });
+        } else {
+          for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
+            await this.app.client.chat.postMessage({
+              channel: channelId,
+              text: text.slice(i, i + MAX_MESSAGE_LENGTH),
+            });
+          }
         }
       }
       logger.info({ jid, length: text.length }, 'Slack message sent');
     } catch (err) {
+      this.placeholderTs.delete(jid);
       this.outgoingQueue.push({ jid, text });
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
@@ -203,11 +250,30 @@ export class SlackChannel implements Channel {
     await this.app.stop();
   }
 
-  // Slack does not expose a typing indicator API for bots.
-  // This no-op satisfies the Channel interface so the orchestrator
-  // doesn't need channel-specific branching.
-  async setTyping(_jid: string, _isTyping: boolean): Promise<void> {
-    // no-op: Slack Bot API has no typing indicator endpoint
+  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    const channelId = jid.replace(/^slack:/, '');
+    if (isTyping) {
+      try {
+        const res = await this.app.client.chat.postMessage({
+          channel: channelId,
+          text: ':meat_on_bone::dash: ゴムゴムの〜 ...',
+        });
+        if (res.ts) this.placeholderTs.set(jid, res.ts);
+      } catch (err) {
+        logger.debug({ jid, err }, 'Failed to post Slack placeholder');
+      }
+    } else {
+      // Clean up placeholder if it was never replaced by sendMessage
+      const ts = this.placeholderTs.get(jid);
+      if (ts) {
+        this.placeholderTs.delete(jid);
+        try {
+          await this.app.client.chat.delete({ channel: channelId, ts });
+        } catch {
+          // Already updated or deleted — ignore
+        }
+      }
+    }
   }
 
   /**
@@ -241,6 +307,17 @@ export class SlackChannel implements Channel {
       logger.info({ count }, 'Slack channel metadata synced');
     } catch (err) {
       logger.error({ err }, 'Failed to sync Slack channel metadata');
+    }
+  }
+
+  private async resolveChannelName(channelId: string): Promise<string> {
+    try {
+      const result = await this.app.client.conversations.info({ channel: channelId });
+      return result.channel?.name
+        ? `Slack #${result.channel.name}`
+        : `Slack #${channelId}`;
+    } catch {
+      return `Slack #${channelId}`;
     }
   }
 

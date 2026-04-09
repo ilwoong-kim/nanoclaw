@@ -314,7 +314,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (unprocessed.length === 0) continue;
 
     if (triggerPattern && allowlistCfg) {
-      if (!hasTriggeredMessage(unprocessed, chatJid, triggerPattern, allowlistCfg))
+      if (
+        !hasTriggeredMessage(unprocessed, chatJid, triggerPattern, allowlistCfg)
+      )
         continue;
     }
 
@@ -345,7 +347,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   channel.setThreadContext?.(chatJid, selectedThreadId);
 
   logger.info(
-    { group: group.name, threadId: selectedThreadId, messageCount: selectedMessages.length },
+    {
+      group: group.name,
+      threadId: selectedThreadId,
+      messageCount: selectedMessages.length,
+    },
     'Processing messages',
   );
 
@@ -486,7 +492,13 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder, threadId),
+        queue.registerProcess(
+          chatJid,
+          proc,
+          containerName,
+          group.folder,
+          threadId,
+        ),
       wrappedOnOutput,
     );
 

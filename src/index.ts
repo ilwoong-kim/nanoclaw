@@ -657,8 +657,20 @@ async function main(): Promise<void> {
           queue.clearSession(chatJid);
 
           // Purge Claude SDK session files so the next container starts truly fresh
-          const sdkSessionsDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude', 'sessions');
-          const sdkProjectsDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude', 'projects');
+          const sdkSessionsDir = path.join(
+            DATA_DIR,
+            'sessions',
+            group.folder,
+            '.claude',
+            'sessions',
+          );
+          const sdkProjectsDir = path.join(
+            DATA_DIR,
+            'sessions',
+            group.folder,
+            '.claude',
+            'projects',
+          );
           fs.rmSync(sdkSessionsDir, { recursive: true, force: true });
           fs.rmSync(sdkProjectsDir, { recursive: true, force: true });
 

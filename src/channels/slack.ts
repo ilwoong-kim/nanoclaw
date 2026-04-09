@@ -35,7 +35,11 @@ export class SlackChannel implements Channel {
   private app: App;
   private botUserId: string | undefined;
   private connected = false;
-  private outgoingQueue: Array<{ jid: string; text: string; threadTs?: string }> = [];
+  private outgoingQueue: Array<{
+    jid: string;
+    text: string;
+    threadTs?: string;
+  }> = [];
   private flushing = false;
   private userNameCache = new Map<string, string>();
   private pendingRegistrations = new Set<string>();
@@ -156,10 +160,11 @@ export class SlackChannel implements Channel {
       // thread_id for session isolation:
       // - In a thread: msg.thread_ts (parent message ts)
       // - Top-level bot mention in group: msg.ts (starts new thread)
-      // - Otherwise: undefined (channel-level, no thread isolation)
+      // - DM: msg.thread_ts || msg.ts (every message gets a thread)
+      // - Non-mention group message outside thread: undefined
       const threadId = isGroup
         ? msg.thread_ts || (isBotMentionedHere ? msg.ts : undefined)
-        : undefined;
+        : msg.thread_ts || msg.ts;
 
       this.opts.onMessage(jid, {
         id: msg.ts,

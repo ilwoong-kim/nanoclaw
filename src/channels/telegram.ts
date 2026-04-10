@@ -425,7 +425,10 @@ export class TelegramChannel implements Channel {
       );
       const stateKey = threadId ? `${numericId}:${threadId}` : numericId;
       const storedMsgId = this.triggerMessageIds.get(stateKey);
-      if (storedMsgId && !this.reactedMessages.has(`${numericId}:${storedMsgId}`)) {
+      if (
+        storedMsgId &&
+        !this.reactedMessages.has(`${numericId}:${storedMsgId}`)
+      ) {
         this.reactedMessages.add(`${numericId}:${storedMsgId}`);
         this.addReaction(numericId, parseInt(storedMsgId, 10), '👍');
       }

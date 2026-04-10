@@ -99,7 +99,12 @@ export interface Channel {
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
-  setTyping?(jid: string, isTyping: boolean, threadId?: string, triggerMessageId?: string): Promise<void>;
+  setTyping?(
+    jid: string,
+    isTyping: boolean,
+    threadId?: string,
+    triggerMessageId?: string,
+  ): Promise<void>;
   // Optional: set active thread context for threaded channels (e.g., Slack).
   // Called before sendMessage/setTyping so responses go to the correct thread.
   setThreadContext?(jid: string, threadId: string | undefined): void;

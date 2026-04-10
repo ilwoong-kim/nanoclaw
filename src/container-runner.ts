@@ -49,6 +49,7 @@ export interface ContainerInput {
   assistantName?: string;
   script?: string;
   threadId?: string;
+  imagePaths?: string[];
 }
 
 export interface ContainerOutput {

@@ -26,12 +26,14 @@
     "@slack/types": "^2.15.0",
     "better-sqlite3": "11.10.0",
     "cron-parser": "5.5.0",
-    "grammy": "^1.39.3"
+    "grammy": "^1.39.3",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
+    "@types/sharp": "^0.31.1",
     "eslint": "^9.35.0",
     "eslint-plugin-no-catch-all": "^1.1.0",
     "globals": "^15.12.0",

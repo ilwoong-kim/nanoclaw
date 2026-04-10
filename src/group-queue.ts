@@ -186,7 +186,12 @@ export class GroupQueue {
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
    */
-  sendMessage(groupJid: string, text: string, threadId?: string): boolean {
+  sendMessage(
+    groupJid: string,
+    text: string,
+    threadId?: string,
+    imagePaths?: string[],
+  ): boolean {
     const key = queueKey(groupJid, threadId);
     const state = this.getGroup(key);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
@@ -200,7 +205,14 @@ export class GroupQueue {
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
-      fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
+      const payload: { type: string; text: string; imagePaths?: string[] } = {
+        type: 'message',
+        text,
+      };
+      if (imagePaths && imagePaths.length > 0) {
+        payload.imagePaths = imagePaths;
+      }
+      fs.writeFileSync(tempPath, JSON.stringify(payload));
       fs.renameSync(tempPath, filepath);
       return true;
     } catch {

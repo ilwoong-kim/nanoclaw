@@ -5,7 +5,9 @@ import path from 'path';
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { detectMimeType } from './image.js';
 import {
+  ImageAttachment,
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
@@ -164,6 +166,13 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Add image_paths column for image vision support
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN image_paths TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -291,8 +300,12 @@ export function setLastGroupSync(): void {
  * Only call this for registered groups where message history is needed.
  */
 export function storeMessage(msg: NewMessage): void {
+  const imagePaths =
+    msg.images && msg.images.length > 0
+      ? JSON.stringify(msg.images.map((i) => i.path))
+      : null;
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, thread_id, image_paths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -306,6 +319,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
     msg.thread_id ?? null,
+    imagePaths,
   );
 }
 
@@ -338,6 +352,28 @@ export function storeMessageDirect(msg: {
   );
 }
 
+/** Reconstruct images array from DB image_paths JSON column */
+function hydrateImages(
+  row: NewMessage & { image_paths?: string | null },
+): NewMessage {
+  const { image_paths, ...msg } = row;
+  if (image_paths) {
+    try {
+      const paths = JSON.parse(image_paths) as string[];
+      msg.images = paths.map(
+        (p): ImageAttachment => ({
+          path: p,
+          mediaType: detectMimeType(p),
+          filename: p.split('/').pop() || 'image',
+        }),
+      );
+    } catch {
+      /* malformed JSON — ignore */
+    }
+  }
+  return msg;
+}
+
 export function getNewMessages(
   jids: string[],
   lastTimestamp: string,
@@ -354,7 +390,7 @@ export function getNewMessages(
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
              reply_to_message_id, reply_to_message_content, reply_to_sender_name,
-             thread_id
+             thread_id, image_paths
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -366,14 +402,16 @@ export function getNewMessages(
 
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as (NewMessage & {
+    image_paths?: string | null;
+  })[];
 
   let newTimestamp = lastTimestamp;
   for (const row of rows) {
     if (row.timestamp > newTimestamp) newTimestamp = row.timestamp;
   }
 
-  return { messages: rows, newTimestamp };
+  return { messages: rows.map(hydrateImages), newTimestamp };
 }
 
 export function getMessagesSince(
@@ -391,7 +429,7 @@ export function getMessagesSince(
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
              reply_to_message_id, reply_to_message_content, reply_to_sender_name,
-             thread_id
+             thread_id, image_paths
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -404,7 +442,10 @@ export function getMessagesSince(
   const params: unknown[] = [chatJid, sinceTimestamp, `${botPrefix}:%`];
   if (threadId) params.push(threadId);
   params.push(limit);
-  return db.prepare(sql).all(...params) as NewMessage[];
+  const rows = db.prepare(sql).all(...params) as (NewMessage & {
+    image_paths?: string | null;
+  })[];
+  return rows.map(hydrateImages);
 }
 
 export function getLastBotMessageTimestamp(

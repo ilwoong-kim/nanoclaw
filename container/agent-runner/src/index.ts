@@ -34,6 +34,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  imagePaths?: string[];
 }
 
 interface ContainerOutput {
@@ -54,9 +55,17 @@ interface SessionsIndex {
   entries: SessionEntry[];
 }
 
+type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+type TextBlock = { type: 'text'; text: string };
+type ImageBlock = {
+  type: 'image';
+  source: { type: 'base64'; media_type: ImageMediaType; data: string };
+};
+type ContentBlock = TextBlock | ImageBlock;
+
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
 }
@@ -64,6 +73,54 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+
+function detectMimeType(filePath: string): ImageMediaType {
+  const ext = path.extname(filePath).toLowerCase();
+  const map: Record<string, ImageMediaType> = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+  };
+  return map[ext] || 'image/jpeg';
+}
+
+async function buildImageBlocks(imagePaths: string[]): Promise<ImageBlock[]> {
+  const results = await Promise.all(
+    imagePaths.map(async (p): Promise<ImageBlock | null> => {
+      try {
+        const buf = await fs.promises.readFile(p);
+        return {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: detectMimeType(p),
+            data: buf.toString('base64'),
+          },
+        };
+      } catch (err) {
+        log(`Failed to read image ${p}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+    }),
+  );
+  return results.filter((b): b is ImageBlock => b !== null);
+}
+
+/**
+ * Build content (text or multimodal) for a message with optional images.
+ */
+async function buildContent(
+  text: string,
+  imagePaths?: string[],
+): Promise<string | ContentBlock[]> {
+  if (!imagePaths || imagePaths.length === 0) return text;
+  const imageBlocks = await buildImageBlocks(imagePaths);
+  if (imageBlocks.length === 0) return text;
+  log(`Sending ${imageBlocks.length} image(s) as multimodal content blocks`);
+  return [{ type: 'text', text } as TextBlock, ...imageBlocks];
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -74,10 +131,10 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(content: string | ContentBlock[]): void {
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -309,7 +366,12 @@ function shouldClose(): boolean {
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
-function drainIpcInput(): string[] {
+interface IpcMessage {
+  text: string;
+  imagePaths?: string[];
+}
+
+function drainIpcInput(): IpcMessage[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs
@@ -317,14 +379,17 @@ function drainIpcInput(): string[] {
       .filter((f) => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const messages: IpcMessage[] = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+          messages.push({
+            text: data.text,
+            imagePaths: data.imagePaths,
+          });
         }
       } catch (err) {
         log(
@@ -348,7 +413,7 @@ function drainIpcInput(): string[] {
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages as a single string, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<IpcMessage | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
@@ -357,7 +422,16 @@ function waitForIpcMessage(): Promise<string | null> {
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages.join('\n'));
+        // Merge all messages into one
+        const mergedText = messages.map((m) => m.text).join('\n');
+        const mergedImagePaths = messages.flatMap(
+          (m) => m.imagePaths ?? [],
+        );
+        resolve({
+          text: mergedText,
+          imagePaths:
+            mergedImagePaths.length > 0 ? mergedImagePaths : undefined,
+        });
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -385,12 +459,12 @@ async function runQuery(
   closedDuringQuery: boolean;
 }> {
   const stream = new MessageStream();
-  stream.push(prompt);
+  stream.push(await buildContent(prompt, containerInput.imagePaths));
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
   let closedDuringQuery = false;
-  const pollIpcDuringQuery = () => {
+  const pollIpcDuringQuery = async () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
       log('Close sentinel detected during query, ending stream');
@@ -400,9 +474,9 @@ async function runQuery(
       return;
     }
     const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    for (const msg of messages) {
+      log(`Piping IPC message into active query (${msg.text.length} chars)`);
+      stream.push(await buildContent(msg.text, msg.imagePaths));
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -685,7 +759,15 @@ async function main(): Promise<void> {
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    prompt += '\n' + pending.map((m) => m.text).join('\n');
+    // Merge any images from pending messages into containerInput
+    const pendingImages = pending.flatMap((m) => m.imagePaths ?? []);
+    if (pendingImages.length > 0) {
+      containerInput.imagePaths = [
+        ...(containerInput.imagePaths ?? []),
+        ...pendingImages,
+      ];
+    }
   }
 
   // Script phase: run script before waking agent
@@ -753,8 +835,9 @@ async function main(): Promise<void> {
         break;
       }
 
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
+      log(`Got new message (${nextMessage.text.length} chars), starting new query`);
+      prompt = nextMessage.text;
+      containerInput.imagePaths = nextMessage.imagePaths;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

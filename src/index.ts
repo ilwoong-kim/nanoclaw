@@ -49,6 +49,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { MAX_IMAGES_PER_BATCH } from './image.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -378,6 +379,15 @@ async function processGroupMessages(
   const tKey = cursorKey(chatJid, selectedThreadId);
   const prompt = formatMessages(selectedMessages, TIMEZONE);
 
+  // Collect image paths from messages (limit to prevent context window exhaustion)
+  const allImagePaths = selectedMessages
+    .flatMap((m) => m.images ?? [])
+    .map((img) => img.path);
+  const imagePaths =
+    allImagePaths.length > 0
+      ? allImagePaths.slice(-MAX_IMAGES_PER_BATCH)
+      : undefined;
+
   // Advance thread-specific cursor. Save old cursor for rollback on error.
   const previousCursor = lastAgentTimestamp[tKey] || '';
   lastAgentTimestamp[tKey] =
@@ -442,6 +452,7 @@ async function processGroupMessages(
       }
     },
     selectedThreadId,
+    imagePaths,
   );
 
   await channel.setTyping?.(chatJid, false, selectedThreadId);
@@ -476,6 +487,7 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   threadId?: string,
+  imagePaths?: string[],
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sKey = sessionKey(group.folder, threadId);
@@ -531,6 +543,7 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         threadId,
+        imagePaths,
       },
       (proc, containerName) =>
         queue.registerProcess(
@@ -673,8 +686,21 @@ async function startMessageLoop(): Promise<void> {
               });
             }
             const formatted = formatMessages(messagesToSend, TIMEZONE);
+            const followUpImagePaths = messagesToSend
+              .flatMap((m) => m.images ?? [])
+              .slice(-MAX_IMAGES_PER_BATCH)
+              .map((img) => img.path);
 
-            if (queue.sendMessage(chatJid, formatted, threadId)) {
+            if (
+              queue.sendMessage(
+                chatJid,
+                formatted,
+                threadId,
+                followUpImagePaths.length > 0
+                  ? followUpImagePaths
+                  : undefined,
+              )
+            ) {
               logger.debug(
                 { chatJid, threadId, count: messagesToSend.length },
                 'Piped messages to active container',

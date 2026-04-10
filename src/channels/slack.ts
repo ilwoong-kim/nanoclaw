@@ -1,13 +1,19 @@
 import { App, LogLevel } from '@slack/bolt';
 import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
 
+import fs from 'fs';
+import path from 'path';
+
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
+import { processImage } from '../image.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  ImageAttachment,
   OnInboundMessage,
   OnChatMetadata,
   RegisteredGroup,
@@ -53,13 +59,19 @@ export class SlackChannel implements Channel {
   private activeThreadTs = new Map<string, string>();
 
   private opts: SlackChannelOpts;
+  private botToken: string;
+  private userToken: string | undefined;
 
   constructor(opts: SlackChannelOpts) {
     this.opts = opts;
 
     // Read tokens from .env (not process.env — keeps secrets off the environment
     // so they don't leak to child processes, matching NanoClaw's security pattern)
-    const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
+    const env = readEnvFile([
+      'SLACK_BOT_TOKEN',
+      'SLACK_APP_TOKEN',
+      'SLACK_USER_TOKEN',
+    ]);
     const botToken = env.SLACK_BOT_TOKEN;
     const appToken = env.SLACK_APP_TOKEN;
 
@@ -69,6 +81,8 @@ export class SlackChannel implements Channel {
       );
     }
 
+    this.botToken = botToken;
+    this.userToken = env.SLACK_USER_TOKEN;
     this.app = new App({
       token: botToken,
       appToken,
@@ -92,7 +106,20 @@ export class SlackChannel implements Channel {
       // After filtering, event is either GenericMessageEvent or BotMessageEvent
       const msg = event as HandledMessageEvent;
 
-      if (!msg.text) return;
+      // Extract image files from file_share events
+      const files = (msg as any).files as
+        | Array<{
+            id: string;
+            name?: string;
+            mimetype?: string;
+            url_private_download?: string;
+          }>
+        | undefined;
+      const imageFiles =
+        files?.filter((f) => f.mimetype?.startsWith('image/')) ?? [];
+
+      // Allow through if there's text OR image files
+      if (!msg.text && imageFiles.length === 0) return;
 
       const jid = `slack:${msg.channel}`;
       const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
@@ -105,9 +132,10 @@ export class SlackChannel implements Channel {
       // If the channel is not registered but the bot was @mentioned (or it's a DM),
       // auto-register so users can invoke the bot from any channel it's been invited to.
       const groups = this.opts.registeredGroups();
+      const mentionText = msg.text || '';
       if (!groups[jid]) {
         const isBotMentioned =
-          this.botUserId && msg.text.includes(`<@${this.botUserId}>`);
+          this.botUserId && mentionText.includes(`<@${this.botUserId}>`);
         const isDm = msg.channel_type === 'im';
         if (!isBotMentioned && !isDm) return;
 
@@ -148,18 +176,28 @@ export class SlackChannel implements Channel {
       // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
       // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
       // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
-      let content = msg.text;
+      let content = msg.text || '';
       const isBotMentionedHere =
         !!this.botUserId &&
         !isBotMessage &&
-        msg.text.includes(`<@${this.botUserId}>`);
+        mentionText.includes(`<@${this.botUserId}>`);
       if (isBotMentionedHere) {
         if (!TRIGGER_PATTERN.test(content)) {
           content = `@${ASSISTANT_NAME} ${content}`;
         }
-        // Thread context is set by index.ts via setThreadContext before
-        // sendMessage/setTyping — not here, to avoid race conditions when
-        // multiple threads trigger concurrently.
+      }
+
+      // Download and process image files
+      let images: ImageAttachment[] | undefined;
+      if (imageFiles.length > 0 && !isBotMessage) {
+        const group = groups[jid];
+        if (group) {
+          images = await this.processSlackImages(imageFiles, group.folder);
+          // Add image references to text content for fallback
+          for (const img of images) {
+            content += ` [Image: ${img.filename}] (${img.path})`;
+          }
+        }
       }
 
       // thread_id for session isolation:
@@ -181,6 +219,7 @@ export class SlackChannel implements Channel {
         is_from_me: isBotMessage,
         is_bot_message: isBotMessage,
         thread_id: threadId,
+        images,
       });
     });
   }
@@ -485,6 +524,112 @@ export class SlackChannel implements Channel {
       logger.debug({ userId, err }, 'Failed to resolve Slack user name');
       return undefined;
     }
+  }
+
+  /**
+   * Download a Slack file using authenticated URL.
+   */
+  private async downloadSlackFile(
+    fileUrl: string,
+    groupFolder: string,
+    filename: string,
+  ): Promise<{ containerPath: string; hostPath: string } | null> {
+    try {
+      const groupDir = resolveGroupFolderPath(groupFolder);
+      const attachDir = path.join(groupDir, 'attachments');
+      fs.mkdirSync(attachDir, { recursive: true });
+
+      const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const destPath = path.join(attachDir, safeName);
+
+      // Prefer user token for file downloads — bot tokens often get HTML login pages
+      const token = this.userToken || this.botToken;
+      const resp = await fetch(fileUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        logger.warn(
+          { fileUrl, status: resp.status },
+          'Slack file download failed',
+        );
+        return null;
+      }
+
+      // Verify we got an image, not an HTML login page
+      const contentType = resp.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        logger.warn(
+          { fileUrl, contentType },
+          'Slack file download returned HTML — token may lack files:read scope',
+        );
+        return null;
+      }
+
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      fs.writeFileSync(destPath, buffer);
+
+      logger.info({ filename: safeName }, 'Slack file downloaded');
+      return {
+        containerPath: `/workspace/group/attachments/${safeName}`,
+        hostPath: destPath,
+      };
+    } catch (err) {
+      logger.error({ err, filename }, 'Failed to download Slack file');
+      return null;
+    }
+  }
+
+  /**
+   * Download and process Slack image files for vision.
+   */
+  private async processSlackImages(
+    imageFiles: Array<{
+      id: string;
+      name?: string;
+      mimetype?: string;
+      url_private_download?: string;
+    }>,
+    groupFolder: string,
+  ): Promise<ImageAttachment[]> {
+    const groupDir = resolveGroupFolderPath(groupFolder);
+    const attachDir = path.join(groupDir, 'attachments');
+
+    const settled = await Promise.all(
+      imageFiles.map(async (file): Promise<ImageAttachment | null> => {
+        let downloadUrl = file.url_private_download;
+        if (!downloadUrl) {
+          try {
+            const info = await this.app.client.files.info({ file: file.id });
+            downloadUrl = (info.file as any)?.url_private_download;
+          } catch (err) {
+            logger.warn(
+              { fileId: file.id, err },
+              'Failed to get Slack file info',
+            );
+            return null;
+          }
+        }
+        if (!downloadUrl) return null;
+
+        const filename =
+          file.name ||
+          `slack_image_${file.id}.${file.mimetype?.split('/')[1] || 'jpg'}`;
+        const downloaded = await this.downloadSlackFile(
+          downloadUrl,
+          groupFolder,
+          filename,
+        );
+        if (!downloaded) return null;
+
+        return processImage(
+          downloaded.hostPath,
+          attachDir,
+          '/workspace/group/attachments',
+        );
+      }),
+    );
+
+    return settled.filter((r): r is ImageAttachment => r !== null);
   }
 
   private async flushOutgoingQueue(): Promise<void> {

@@ -7,10 +7,12 @@ import { Api, Bot } from 'grammy';
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
+import { processImage } from '../image.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  ImageAttachment,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
@@ -66,7 +68,7 @@ export class TelegramChannel implements Channel {
     fileId: string,
     groupFolder: string,
     filename: string,
-  ): Promise<string | null> {
+  ): Promise<{ containerPath: string; hostPath: string } | null> {
     if (!this.bot) return null;
 
     try {
@@ -101,7 +103,10 @@ export class TelegramChannel implements Channel {
       fs.writeFileSync(destPath, buffer);
 
       logger.info({ fileId, dest: destPath }, 'Telegram file downloaded');
-      return `/workspace/group/attachments/${finalName}`;
+      return {
+        containerPath: `/workspace/group/attachments/${finalName}`,
+        hostPath: destPath,
+      };
     } catch (err) {
       logger.error({ fileId, err }, 'Failed to download Telegram file');
       return null;
@@ -239,7 +244,7 @@ export class TelegramChannel implements Channel {
     const storeMedia = (
       ctx: any,
       placeholder: string,
-      opts?: { fileId?: string; filename?: string },
+      opts?: { fileId?: string; filename?: string; isPhoto?: boolean },
     ) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
@@ -263,7 +268,7 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
-      const deliver = (content: string) => {
+      const deliver = (content: string, images?: ImageAttachment[]) => {
         this.opts.onMessage(chatJid, {
           id: ctx.message.message_id.toString(),
           chat_jid: chatJid,
@@ -272,6 +277,7 @@ export class TelegramChannel implements Channel {
           content,
           timestamp,
           is_from_me: false,
+          images,
         });
       };
 
@@ -282,12 +288,27 @@ export class TelegramChannel implements Channel {
           opts.filename ||
           `${placeholder.replace(/[\[\] ]/g, '').toLowerCase()}_${msgId}`;
         this.downloadFile(opts.fileId, group.folder, filename).then(
-          (filePath) => {
-            if (filePath) {
-              deliver(`${placeholder} (${filePath})${caption}`);
-            } else {
+          async (result) => {
+            if (!result) {
               deliver(`${placeholder}${caption}`);
+              return;
             }
+
+            // For photos, process for vision
+            if (opts.isPhoto) {
+              const groupDir = resolveGroupFolderPath(group.folder);
+              const attachDir = path.join(groupDir, 'attachments');
+              const processed = await processImage(result.hostPath, attachDir, '/workspace/group/attachments');
+              if (processed) {
+                deliver(
+                  `${placeholder} (${processed.path})${caption}`,
+                  [processed],
+                );
+                return;
+              }
+            }
+
+            deliver(`${placeholder} (${result.containerPath})${caption}`);
           },
         );
         return;
@@ -303,6 +324,7 @@ export class TelegramChannel implements Channel {
       storeMedia(ctx, '[Photo]', {
         fileId: largest?.file_id,
         filename: `photo_${ctx.message.message_id}`,
+        isPhoto: true,
       });
     });
     this.bot.on('message:video', (ctx) => {

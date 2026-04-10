@@ -29,7 +29,10 @@ export async function processImage(
     fs.mkdirSync(outputDir, { recursive: true });
 
     await sharp(inputPath)
-      .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
+      .resize(MAX_DIMENSION, MAX_DIMENSION, {
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
       .jpeg({ quality: JPEG_QUALITY })
       .toFile(outputPath);
 
@@ -41,7 +44,10 @@ export async function processImage(
       filename: outputName,
     };
   } catch (err) {
-    logger.warn({ inputPath, err }, 'Failed to process image, falling back to text-only');
+    logger.warn(
+      { inputPath, err },
+      'Failed to process image, falling back to text-only',
+    );
     return null;
   }
 }

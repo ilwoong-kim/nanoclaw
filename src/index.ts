@@ -417,7 +417,8 @@ async function processGroupMessages(
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true, selectedThreadId);
+  const triggerMsgId = selectedMessages[selectedMessages.length - 1]?.id;
+  await channel.setTyping?.(chatJid, true, selectedThreadId, triggerMsgId);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -696,9 +697,7 @@ async function startMessageLoop(): Promise<void> {
                 chatJid,
                 formatted,
                 threadId,
-                followUpImagePaths.length > 0
-                  ? followUpImagePaths
-                  : undefined,
+                followUpImagePaths.length > 0 ? followUpImagePaths : undefined,
               )
             ) {
               logger.debug(
@@ -708,8 +707,10 @@ async function startMessageLoop(): Promise<void> {
               lastAgentTimestamp[cursorKey(chatJid, threadId)] =
                 messagesToSend[messagesToSend.length - 1].timestamp;
               saveState();
+              const pipedTriggerMsgId =
+                messagesToSend[messagesToSend.length - 1]?.id;
               channel
-                .setTyping?.(chatJid, true, threadId)
+                .setTyping?.(chatJid, true, threadId, pipedTriggerMsgId)
                 ?.catch((err) =>
                   logger.warn(
                     { chatJid, err },

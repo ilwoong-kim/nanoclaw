@@ -47,6 +47,7 @@ vi.mock('grammy', () => ({
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      setMessageReaction: vi.fn().mockResolvedValue(true),
       getFile: vi.fn().mockResolvedValue({ file_path: 'photos/file_0.jpg' }),
     };
 
@@ -1087,6 +1088,105 @@ describe('TelegramChannel', () => {
 
       await expect(
         channel.setTyping('tg:100200300', true),
+      ).resolves.toBeUndefined();
+    });
+
+    it('adds 👀 reaction when triggerMessageId is provided', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.setTyping('tg:100200300', true, undefined, '42');
+
+      expect(currentBot().api.setMessageReaction).toHaveBeenCalledWith(
+        '100200300',
+        42,
+        [{ type: 'emoji', emoji: '👀' }],
+      );
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
+        '100200300',
+        'typing',
+      );
+    });
+
+    it('does not add reaction when triggerMessageId is not provided', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.setTyping('tg:100200300', true);
+
+      expect(currentBot().api.setMessageReaction).not.toHaveBeenCalled();
+    });
+
+    it('cleans up state on setTyping(false)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Set up state
+      await channel.setTyping('tg:100200300', true, undefined, '42');
+      currentBot().api.setMessageReaction.mockClear();
+
+      // Clean up
+      await channel.setTyping('tg:100200300', false);
+
+      // Sending a message should NOT add 👍 since state was cleaned up
+      await channel.sendMessage('tg:100200300', 'Hello');
+      expect(currentBot().api.setMessageReaction).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- sendMessage reactions ---
+
+  describe('sendMessage reactions', () => {
+    it('adds 👍 reaction on first response after setTyping', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Simulate processing start
+      await channel.setTyping('tg:100200300', true, undefined, '42');
+      currentBot().api.setMessageReaction.mockClear();
+
+      // Send response
+      await channel.sendMessage('tg:100200300', 'Response text');
+
+      expect(currentBot().api.setMessageReaction).toHaveBeenCalledWith(
+        '100200300',
+        42,
+        [{ type: 'emoji', emoji: '👍' }],
+      );
+    });
+
+    it('does not add duplicate 👍 on subsequent responses', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.setTyping('tg:100200300', true, undefined, '42');
+      currentBot().api.setMessageReaction.mockClear();
+
+      await channel.sendMessage('tg:100200300', 'First response');
+      await channel.sendMessage('tg:100200300', 'Second response');
+
+      // setMessageReaction should only be called once (for 👍)
+      expect(currentBot().api.setMessageReaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles reaction failure gracefully', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.setTyping('tg:100200300', true, undefined, '42');
+      currentBot().api.setMessageReaction.mockClear();
+      currentBot().api.setMessageReaction.mockRejectedValueOnce(
+        new Error('Forbidden'),
+      );
+
+      await expect(
+        channel.sendMessage('tg:100200300', 'Response'),
       ).resolves.toBeUndefined();
     });
   });

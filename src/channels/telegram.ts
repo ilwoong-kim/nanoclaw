@@ -53,6 +53,8 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private reactedMessages = new Set<string>();
+  private triggerMessageIds = new Map<string, string>();
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -298,12 +300,15 @@ export class TelegramChannel implements Channel {
             if (opts.isPhoto) {
               const groupDir = resolveGroupFolderPath(group.folder);
               const attachDir = path.join(groupDir, 'attachments');
-              const processed = await processImage(result.hostPath, attachDir, '/workspace/group/attachments');
+              const processed = await processImage(
+                result.hostPath,
+                attachDir,
+                '/workspace/group/attachments',
+              );
               if (processed) {
-                deliver(
-                  `${placeholder} (${processed.path})${caption}`,
-                  [processed],
-                );
+                deliver(`${placeholder} (${processed.path})${caption}`, [
+                  processed,
+                ]);
                 return;
               }
             }
@@ -418,6 +423,12 @@ export class TelegramChannel implements Channel {
         { jid, length: text.length, threadId },
         'Telegram message sent',
       );
+      const stateKey = threadId ? `${numericId}:${threadId}` : numericId;
+      const storedMsgId = this.triggerMessageIds.get(stateKey);
+      if (storedMsgId && !this.reactedMessages.has(`${numericId}:${storedMsgId}`)) {
+        this.reactedMessages.add(`${numericId}:${storedMsgId}`);
+        this.addReaction(numericId, parseInt(storedMsgId, 10), '👍');
+      }
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
     }
@@ -435,6 +446,8 @@ export class TelegramChannel implements Channel {
     if (this.bot) {
       this.bot.stop();
       this.bot = null;
+      this.reactedMessages.clear();
+      this.triggerMessageIds.clear();
       logger.info('Telegram bot stopped');
     }
   }
@@ -442,14 +455,47 @@ export class TelegramChannel implements Channel {
   async setTyping(
     jid: string,
     isTyping: boolean,
-    _threadId?: string,
+    threadId?: string,
+    triggerMessageId?: string,
   ): Promise<void> {
-    if (!this.bot || !isTyping) return;
+    if (!this.bot) return;
+    const numericId = jid.replace(/^tg:/, '');
+    const stateKey = threadId ? `${numericId}:${threadId}` : numericId;
+
+    if (isTyping) {
+      if (triggerMessageId) {
+        this.triggerMessageIds.set(stateKey, triggerMessageId);
+        this.addReaction(numericId, parseInt(triggerMessageId, 10), '👀');
+      }
+      try {
+        await this.bot.api.sendChatAction(numericId, 'typing');
+      } catch (err) {
+        logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
+      }
+    } else {
+      const storedMsgId = this.triggerMessageIds.get(stateKey);
+      if (storedMsgId) {
+        this.reactedMessages.delete(`${numericId}:${storedMsgId}`);
+        this.triggerMessageIds.delete(stateKey);
+      }
+    }
+  }
+
+  private async addReaction(
+    chatId: string | number,
+    messageId: number,
+    emoji: '👀' | '👍',
+  ): Promise<void> {
+    if (!this.bot) return;
     try {
-      const numericId = jid.replace(/^tg:/, '');
-      await this.bot.api.sendChatAction(numericId, 'typing');
+      await this.bot.api.setMessageReaction(chatId, messageId, [
+        { type: 'emoji', emoji },
+      ]);
     } catch (err) {
-      logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
+      logger.debug(
+        { chatId, messageId, emoji, err },
+        'Failed to add Telegram reaction',
+      );
     }
   }
 }

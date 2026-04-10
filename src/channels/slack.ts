@@ -398,6 +398,9 @@ export class SlackChannel implements Channel {
     if (isTyping) {
       // Store trigger message ID for reaction targeting
       if (triggerMessageId) {
+        // Cap to prevent unbounded growth on error paths where setTyping(false) never fires
+        if (this.triggerMessageIds.size > 500) this.triggerMessageIds.clear();
+        if (this.reactedMessages.size > 500) this.reactedMessages.clear();
         this.triggerMessageIds.set(stateKey, triggerMessageId);
       }
       // React with 👀 on the triggering message to show we're looking at it
@@ -453,9 +456,7 @@ export class SlackChannel implements Channel {
     } else {
       this.clearHeartbeat(placeholderKey);
       const storedMsgTs = this.triggerMessageIds.get(stateKey);
-      this.reactedMessages.delete(
-        `${channelId}:${storedMsgTs || threadTs}`,
-      );
+      this.reactedMessages.delete(`${channelId}:${storedMsgTs || threadTs}`);
       this.triggerMessageIds.delete(stateKey);
       const ts = this.placeholderTs.get(placeholderKey);
       if (ts) {

@@ -45,6 +45,8 @@ export class SlackChannel implements Channel {
   private pendingRegistrations = new Set<string>();
   /** Stores the ts of a placeholder message per channel, so sendMessage can update it. */
   private placeholderTs = new Map<string, string>();
+  /** Heartbeat intervals that update placeholders to show the bot is still working */
+  private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   /** Active thread_ts per channel — responses go into this thread */
   private activeThreadTs = new Map<string, string>();
 
@@ -225,6 +227,7 @@ export class SlackChannel implements Channel {
       const placeholderTs = this.placeholderTs.get(placeholderKey);
 
       if (placeholderTs && text.length <= MAX_MESSAGE_LENGTH) {
+        this.clearHeartbeat(placeholderKey);
         this.placeholderTs.delete(placeholderKey);
         await this.app.client.chat.update({
           channel: channelId,
@@ -233,6 +236,7 @@ export class SlackChannel implements Channel {
         });
       } else {
         if (placeholderTs) {
+          this.clearHeartbeat(placeholderKey);
           this.placeholderTs.delete(placeholderKey);
           await this.app.client.chat
             .delete({ channel: channelId, ts: placeholderTs })
@@ -256,6 +260,7 @@ export class SlackChannel implements Channel {
       }
       logger.info({ jid, length: text.length, threadTs }, 'Slack message sent');
     } catch (err) {
+      this.clearHeartbeat(placeholderKey);
       this.placeholderTs.delete(placeholderKey);
       this.outgoingQueue.push({ jid, text, threadTs });
       logger.warn(
@@ -283,7 +288,45 @@ export class SlackChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    for (const key of this.heartbeatTimers.keys()) {
+      this.clearHeartbeat(key);
+    }
     await this.app.stop();
+  }
+
+  /** Emoji sequence for heartbeat updates (30s intervals, up to ~10 min) */
+  private static readonly HEARTBEAT_EMOJIS = [
+    ':muscle:',
+    ':fire:',
+    ':zap:',
+    ':boom:',
+    ':star2:',
+    ':ocean:',
+    ':wind_blowing_face:',
+    ':cyclone:',
+    ':volcano:',
+    ':comet:',
+    ':dizzy:',
+    ':sparkles:',
+    ':crown:',
+    ':skull_and_crossbones:',
+    ':crossed_swords:',
+    ':anchor:',
+    ':pirate_flag:',
+    ':trophy:',
+    ':rainbow:',
+    ':rocket:',
+  ];
+
+  private static readonly PLACEHOLDER_BASE =
+    ':meat_on_bone::dash: ゴムゴムの〜 ...';
+
+  private clearHeartbeat(placeholderKey: string): void {
+    const timer = this.heartbeatTimers.get(placeholderKey);
+    if (timer) {
+      clearInterval(timer);
+      this.heartbeatTimers.delete(placeholderKey);
+    }
   }
 
   async setTyping(
@@ -298,14 +341,43 @@ export class SlackChannel implements Channel {
       try {
         const res = await this.app.client.chat.postMessage({
           channel: channelId,
-          text: ':meat_on_bone::dash: ゴムゴムの〜 ...',
+          text: SlackChannel.PLACEHOLDER_BASE,
           ...(threadTs && { thread_ts: threadTs }),
         });
-        if (res.ts) this.placeholderTs.set(placeholderKey, res.ts);
+        if (res.ts) {
+          this.placeholderTs.set(placeholderKey, res.ts);
+          this.clearHeartbeat(placeholderKey);
+
+          let tick = 0;
+          const timer = setInterval(async () => {
+            const ts = this.placeholderTs.get(placeholderKey);
+            if (!ts) {
+              this.clearHeartbeat(placeholderKey);
+              return;
+            }
+            tick++;
+            const emojiCount = Math.min(tick, SlackChannel.HEARTBEAT_EMOJIS.length);
+            const emojis = SlackChannel.HEARTBEAT_EMOJIS.slice(0, emojiCount).join('');
+            const elapsed = tick > SlackChannel.HEARTBEAT_EMOJIS.length
+              ? ` (${Math.floor(tick * 30 / 60)}분 경과)`
+              : '';
+            try {
+              await this.app.client.chat.update({
+                channel: channelId,
+                ts,
+                text: `${SlackChannel.PLACEHOLDER_BASE} ${emojis}${elapsed}`,
+              });
+            } catch {
+              this.clearHeartbeat(placeholderKey);
+            }
+          }, 30_000);
+          this.heartbeatTimers.set(placeholderKey, timer);
+        }
       } catch (err) {
         logger.debug({ jid, err }, 'Failed to post Slack placeholder');
       }
     } else {
+      this.clearHeartbeat(placeholderKey);
       const ts = this.placeholderTs.get(placeholderKey);
       if (ts) {
         this.placeholderTs.delete(placeholderKey);

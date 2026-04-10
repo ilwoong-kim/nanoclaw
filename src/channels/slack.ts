@@ -59,10 +59,13 @@ export class SlackChannel implements Channel {
   private triggerMessageIds = new Map<string, string>();
   /** Active thread_ts per channel — responses go into this thread */
   private activeThreadTs = new Map<string, string>();
+  /** Tracks last DM rejection time per user to avoid spamming the Slack API */
+  private dmBlockLastNotified = new Map<string, number>();
 
   private opts: SlackChannelOpts;
   private botToken: string;
   private userToken: string | undefined;
+  private ownerUserId: string | undefined;
 
   constructor(opts: SlackChannelOpts) {
     this.opts = opts;
@@ -73,6 +76,7 @@ export class SlackChannel implements Channel {
       'SLACK_BOT_TOKEN',
       'SLACK_APP_TOKEN',
       'SLACK_USER_TOKEN',
+      'SLACK_OWNER_ID',
     ]);
     const botToken = env.SLACK_BOT_TOKEN;
     const appToken = env.SLACK_APP_TOKEN;
@@ -85,6 +89,7 @@ export class SlackChannel implements Channel {
 
     this.botToken = botToken;
     this.userToken = env.SLACK_USER_TOKEN;
+    this.ownerUserId = env.SLACK_OWNER_ID;
     this.app = new App({
       token: botToken,
       appToken,
@@ -129,6 +134,33 @@ export class SlackChannel implements Channel {
 
       // Always report metadata for group discovery
       this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
+
+      // Block DMs from non-owner users at the channel level
+      if (
+        !isGroup &&
+        this.ownerUserId &&
+        msg.user !== this.ownerUserId &&
+        !msg.bot_id &&
+        msg.user !== this.botUserId
+      ) {
+        const now = Date.now();
+        const lastNotified = this.dmBlockLastNotified.get(msg.user!) ?? 0;
+        if (now - lastNotified > 5 * 60_000) {
+          if (this.dmBlockLastNotified.size > 500)
+            this.dmBlockLastNotified.clear();
+          this.dmBlockLastNotified.set(msg.user!, now);
+          await this.app.client.chat.postMessage({
+            token: this.botToken,
+            channel: msg.channel,
+            text: '죄송합니다. DM으로는 대화할 수 없습니다.',
+          });
+        }
+        logger.info(
+          { sender: msg.user, channel: msg.channel },
+          'Blocked DM from non-owner',
+        );
+        return;
+      }
 
       // Only deliver full messages for registered groups.
       // If the channel is not registered but the bot was @mentioned (or it's a DM),

@@ -53,8 +53,10 @@ export class SlackChannel implements Channel {
   private placeholderTs = new Map<string, string>();
   /** Heartbeat intervals that update placeholders to show the bot is still working */
   private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
-  /** Tracks threads that already received a ✅ reaction to avoid duplicates */
-  private reactedThreads = new Set<string>();
+  /** Tracks messages that already received a ✅ reaction to avoid duplicates */
+  private reactedMessages = new Set<string>();
+  /** Maps stateKey → trigger message timestamp for reaction targeting */
+  private triggerMessageIds = new Map<string, string>();
   /** Active thread_ts per channel — responses go into this thread */
   private activeThreadTs = new Map<string, string>();
 
@@ -302,10 +304,14 @@ export class SlackChannel implements Channel {
       }
       logger.info({ jid, length: text.length, threadTs }, 'Slack message sent');
       // React with ✅ on the triggering message after sending the first response
-      const reactKey = `${channelId}:${threadTs}`;
-      if (threadTs && !this.reactedThreads.has(reactKey)) {
-        this.reactedThreads.add(reactKey);
-        this.addReaction(channelId, 'white_check_mark', threadTs);
+      const stateKey = `${channelId}:${threadTs || ''}`;
+      const triggerMsgTs = this.triggerMessageIds.get(stateKey) || threadTs;
+      if (triggerMsgTs) {
+        const reactKey = `${channelId}:${triggerMsgTs}`;
+        if (!this.reactedMessages.has(reactKey)) {
+          this.reactedMessages.add(reactKey);
+          this.addReaction(channelId, 'white_check_mark', triggerMsgTs);
+        }
       }
     } catch (err) {
       this.clearHeartbeat(placeholderKey);
@@ -339,6 +345,8 @@ export class SlackChannel implements Channel {
     for (const key of this.heartbeatTimers.keys()) {
       this.clearHeartbeat(key);
     }
+    this.reactedMessages.clear();
+    this.triggerMessageIds.clear();
     await this.app.stop();
   }
 
@@ -381,14 +389,21 @@ export class SlackChannel implements Channel {
     jid: string,
     isTyping: boolean,
     threadId?: string,
+    triggerMessageId?: string,
   ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
     const threadTs = threadId || this.activeThreadTs.get(jid);
     const placeholderKey = threadTs ? `${jid}:${threadTs}` : jid;
+    const stateKey = `${channelId}:${threadTs || ''}`;
     if (isTyping) {
+      // Store trigger message ID for reaction targeting
+      if (triggerMessageId) {
+        this.triggerMessageIds.set(stateKey, triggerMessageId);
+      }
       // React with 👀 on the triggering message to show we're looking at it
-      if (threadTs) {
-        this.addReaction(channelId, 'eyes', threadTs);
+      const reactionTs = triggerMessageId || threadTs;
+      if (reactionTs) {
+        this.addReaction(channelId, 'eyes', reactionTs);
       }
       try {
         const res = await this.app.client.chat.postMessage({
@@ -437,7 +452,11 @@ export class SlackChannel implements Channel {
       }
     } else {
       this.clearHeartbeat(placeholderKey);
-      this.reactedThreads.delete(`${channelId}:${threadTs}`);
+      const storedMsgTs = this.triggerMessageIds.get(stateKey);
+      this.reactedMessages.delete(
+        `${channelId}:${storedMsgTs || threadTs}`,
+      );
+      this.triggerMessageIds.delete(stateKey);
       const ts = this.placeholderTs.get(placeholderKey);
       if (ts) {
         this.placeholderTs.delete(placeholderKey);

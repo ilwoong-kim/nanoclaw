@@ -47,6 +47,8 @@ export class SlackChannel implements Channel {
   private placeholderTs = new Map<string, string>();
   /** Heartbeat intervals that update placeholders to show the bot is still working */
   private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  /** Tracks threads that already received a ✅ reaction to avoid duplicates */
+  private reactedThreads = new Set<string>();
   /** Active thread_ts per channel — responses go into this thread */
   private activeThreadTs = new Map<string, string>();
 
@@ -260,8 +262,10 @@ export class SlackChannel implements Channel {
         }
       }
       logger.info({ jid, length: text.length, threadTs }, 'Slack message sent');
-      // React with ✅ on the triggering message after sending the response
-      if (threadTs) {
+      // React with ✅ on the triggering message after sending the first response
+      const reactKey = `${channelId}:${threadTs}`;
+      if (threadTs && !this.reactedThreads.has(reactKey)) {
+        this.reactedThreads.add(reactKey);
         this.addReaction(channelId, 'white_check_mark', threadTs);
       }
     } catch (err) {
@@ -394,6 +398,7 @@ export class SlackChannel implements Channel {
       }
     } else {
       this.clearHeartbeat(placeholderKey);
+      this.reactedThreads.delete(`${channelId}:${threadTs}`);
       const ts = this.placeholderTs.get(placeholderKey);
       if (ts) {
         this.placeholderTs.delete(placeholderKey);

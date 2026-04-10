@@ -64,6 +64,13 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+function isCalendarMcpConfigured(): boolean {
+  return (
+    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'credentials.json')) &&
+    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'gcp-oauth.keys.json'))
+  );
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -237,10 +244,7 @@ function buildVolumeMounts(
   });
 
   // Mount Google Calendar MCP credentials when both OAuth key and token are present
-  if (
-    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'credentials.json')) &&
-    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'gcp-oauth.keys.json'))
-  ) {
+  if (isCalendarMcpConfigured()) {
     mounts.push({
       hostPath: CALENDAR_MCP_DIR,
       containerPath: '/home/node/.calendar-mcp',
@@ -313,10 +317,7 @@ async function buildContainerArgs(
   }
 
   // Signal that Google Calendar MCP credentials are mounted.
-  if (
-    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'credentials.json')) &&
-    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'gcp-oauth.keys.json'))
-  ) {
+  if (isCalendarMcpConfigured()) {
     args.push('-e', 'GOOGLE_CALENDAR_MCP=1');
   }
 

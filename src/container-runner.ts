@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  CALENDAR_MCP_DIR,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -235,6 +236,18 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Mount Google Calendar MCP credentials when both OAuth key and token are present
+  if (
+    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'credentials.json')) &&
+    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'gcp-oauth.keys.json'))
+  ) {
+    mounts.push({
+      hostPath: CALENDAR_MCP_DIR,
+      containerPath: '/home/node/.calendar-mcp',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -297,6 +310,14 @@ async function buildContainerArgs(
   const githubEnv = readEnvFile(['GITHUB_TOKEN']);
   if (githubEnv.GITHUB_TOKEN) {
     args.push('-e', `GITHUB_TOKEN=${githubEnv.GITHUB_TOKEN}`);
+  }
+
+  // Signal that Google Calendar MCP credentials are mounted.
+  if (
+    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'credentials.json')) &&
+    fs.existsSync(path.join(CALENDAR_MCP_DIR, 'gcp-oauth.keys.json'))
+  ) {
+    args.push('-e', 'GOOGLE_CALENDAR_MCP=1');
   }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.

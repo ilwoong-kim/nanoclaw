@@ -470,6 +470,20 @@ async function runQuery(
     };
   }
 
+  if (process.env.GOOGLE_CALENDAR_MCP) {
+    log('Google Calendar MCP: registering server');
+    mcpServers.googleCalendar = {
+      command: 'node',
+      args: [
+        '/usr/local/lib/node_modules/@gongrzhe/server-calendar-autoauth-mcp/build/index.js',
+      ],
+      env: {
+        NO_PROXY: 'host.docker.internal,127.0.0.1,localhost',
+        no_proxy: 'host.docker.internal,127.0.0.1,localhost',
+      },
+    };
+  }
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -500,6 +514,7 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
         'mcp__obsidian__*',
+        'mcp__googleCalendar__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',

@@ -84,7 +84,8 @@ export class SlackChannel implements Channel {
       // Bolt's event type is the full MessageEvent union (17+ subtypes).
       // We filter on subtype first, then narrow to the two types we handle.
       const subtype = (event as { subtype?: string }).subtype;
-      if (subtype && subtype !== 'bot_message') return;
+      if (subtype && subtype !== 'bot_message' && subtype !== 'file_share')
+        return;
 
       // After filtering, event is either GenericMessageEvent or BotMessageEvent
       const msg = event as HandledMessageEvent;
@@ -259,6 +260,10 @@ export class SlackChannel implements Channel {
         }
       }
       logger.info({ jid, length: text.length, threadTs }, 'Slack message sent');
+      // React with ✅ on the triggering message after sending the response
+      if (threadTs) {
+        this.addReaction(channelId, 'white_check_mark', threadTs);
+      }
     } catch (err) {
       this.clearHeartbeat(placeholderKey);
       this.placeholderTs.delete(placeholderKey);
@@ -338,6 +343,10 @@ export class SlackChannel implements Channel {
     const threadTs = threadId || this.activeThreadTs.get(jid);
     const placeholderKey = threadTs ? `${jid}:${threadTs}` : jid;
     if (isTyping) {
+      // React with 👀 on the triggering message to show we're looking at it
+      if (threadTs) {
+        this.addReaction(channelId, 'eyes', threadTs);
+      }
       try {
         const res = await this.app.client.chat.postMessage({
           channel: channelId,
@@ -356,11 +365,18 @@ export class SlackChannel implements Channel {
               return;
             }
             tick++;
-            const emojiCount = Math.min(tick, SlackChannel.HEARTBEAT_EMOJIS.length);
-            const emojis = SlackChannel.HEARTBEAT_EMOJIS.slice(0, emojiCount).join('');
-            const elapsed = tick > SlackChannel.HEARTBEAT_EMOJIS.length
-              ? ` (${Math.floor(tick * 30 / 60)}분 경과)`
-              : '';
+            const emojiCount = Math.min(
+              tick,
+              SlackChannel.HEARTBEAT_EMOJIS.length,
+            );
+            const emojis = SlackChannel.HEARTBEAT_EMOJIS.slice(
+              0,
+              emojiCount,
+            ).join('');
+            const elapsed =
+              tick > SlackChannel.HEARTBEAT_EMOJIS.length
+                ? ` (${Math.floor((tick * 30) / 60)}분 경과)`
+                : '';
             try {
               await this.app.client.chat.update({
                 channel: channelId,
@@ -387,6 +403,18 @@ export class SlackChannel implements Channel {
           // Already updated or deleted — ignore
         }
       }
+    }
+  }
+
+  private async addReaction(
+    channel: string,
+    name: string,
+    timestamp: string,
+  ): Promise<void> {
+    try {
+      await this.app.client.reactions.add({ channel, name, timestamp });
+    } catch (err) {
+      logger.warn({ channel, name, timestamp, err }, 'Failed to add reaction');
     }
   }
 

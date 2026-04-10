@@ -275,7 +275,10 @@ function hasTriggeredMessage(
  * Groups messages by thread and processes the first thread with a trigger.
  * Called by the GroupQueue when it's this group's turn.
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
+async function processGroupMessages(
+  chatJid: string,
+  targetThreadId?: string,
+): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
@@ -290,49 +293,87 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const triggerPattern = needsTrigger ? getTriggerPattern(group.trigger) : null;
   const allowlistCfg = needsTrigger ? loadSenderAllowlist() : null;
 
-  // Fetch messages since the earliest cursor across all threads for discovery
-  const discoveryCursor = getDiscoveryCursor(chatJid);
-  const allMissed = getMessagesSince(
-    chatJid,
-    discoveryCursor,
-    ASSISTANT_NAME,
-    MAX_MESSAGES_PER_PROMPT,
-  );
-
-  if (allMissed.length === 0) return true;
-
-  // Group by thread and find the first thread with a trigger
-  const byThread = groupByThread(allMissed);
   let selectedThreadId: string | undefined;
   let selectedMessages: NewMessage[] | undefined;
 
-  for (const [threadId, msgs] of byThread) {
-    // Filter to messages after this thread's cursor
-    const tKey = cursorKey(chatJid, threadId);
-    const tCursor = lastAgentTimestamp[tKey] || '';
-    const unprocessed = msgs.filter((m) => m.timestamp > tCursor);
-    if (unprocessed.length === 0) continue;
-
-    if (triggerPattern && allowlistCfg) {
-      if (
-        !hasTriggeredMessage(unprocessed, chatJid, triggerPattern, allowlistCfg)
-      )
-        continue;
-    }
-
-    selectedThreadId = threadId;
-    // Fetch full thread context using thread-specific cursor and filter
+  if (targetThreadId !== undefined) {
+    // Thread already known — fetch messages for this specific thread
+    selectedThreadId = targetThreadId;
     selectedMessages = getMessagesSince(
       chatJid,
-      getOrRecoverCursor(chatJid, threadId),
+      getOrRecoverCursor(chatJid, targetThreadId),
       ASSISTANT_NAME,
       MAX_MESSAGES_PER_PROMPT,
-      threadId,
+      targetThreadId,
     );
-    break;
+    if (!selectedMessages || selectedMessages.length === 0) return true;
+    // Check trigger for this thread
+    if (triggerPattern && allowlistCfg) {
+      if (
+        !hasTriggeredMessage(
+          selectedMessages,
+          chatJid,
+          triggerPattern,
+          allowlistCfg,
+        )
+      )
+        return true;
+    }
+  } else {
+    // Discover threads from DB (legacy / non-threaded path)
+    const discoveryCursor = getDiscoveryCursor(chatJid);
+    const allMissed = getMessagesSince(
+      chatJid,
+      discoveryCursor,
+      ASSISTANT_NAME,
+      MAX_MESSAGES_PER_PROMPT,
+    );
+
+    if (allMissed.length === 0) return true;
+
+    const byThread = groupByThread(allMissed);
+
+    for (const [threadId, msgs] of byThread) {
+      const tKey = cursorKey(chatJid, threadId);
+      const tCursor = lastAgentTimestamp[tKey] || '';
+      const unprocessed = msgs.filter((m) => m.timestamp > tCursor);
+      if (unprocessed.length === 0) continue;
+
+      if (triggerPattern && allowlistCfg) {
+        if (
+          !hasTriggeredMessage(
+            unprocessed,
+            chatJid,
+            triggerPattern,
+            allowlistCfg,
+          )
+        )
+          continue;
+      }
+
+      selectedThreadId = threadId;
+      selectedMessages = getMessagesSince(
+        chatJid,
+        getOrRecoverCursor(chatJid, threadId),
+        ASSISTANT_NAME,
+        MAX_MESSAGES_PER_PROMPT,
+        threadId,
+      );
+      break;
+    }
   }
 
   if (!selectedMessages || selectedMessages.length === 0) return true;
+
+  // Strip the trigger mention from message content so the agent doesn't
+  // misinterpret it as part of the question (e.g., "@Luffy-Bot 넌 누구냐?"
+  // becomes "넌 누구냐?"). Only strip from messages that actually triggered.
+  if (triggerPattern) {
+    selectedMessages = selectedMessages.map((m) => {
+      const stripped = m.content.trim().replace(triggerPattern, '').trim();
+      return stripped !== m.content ? { ...m, content: stripped } : m;
+    });
+  }
 
   const tKey = cursorKey(chatJid, selectedThreadId);
   const prompt = formatMessages(selectedMessages, TIMEZONE);
@@ -342,9 +383,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   lastAgentTimestamp[tKey] =
     selectedMessages[selectedMessages.length - 1].timestamp;
   saveState();
-
-  // Set thread context so channel responses go to the correct thread
-  channel.setThreadContext?.(chatJid, selectedThreadId);
 
   logger.info(
     {
@@ -365,11 +403,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         { group: group.name },
         'Idle timeout, closing container stdin',
       );
-      queue.closeStdin(chatJid);
+      queue.closeStdin(chatJid, selectedThreadId);
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
+  await channel.setTyping?.(chatJid, true, selectedThreadId);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -388,7 +426,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
         if (text) {
-          await channel.sendMessage(chatJid, text);
+          await channel.sendMessage(chatJid, text, selectedThreadId);
           outputSentToUser = true;
         }
         // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -396,7 +434,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
 
       if (result.status === 'success') {
-        queue.notifyIdle(chatJid);
+        queue.notifyIdle(chatJid, selectedThreadId);
       }
 
       if (result.status === 'error') {
@@ -406,7 +444,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     selectedThreadId,
   );
 
-  await channel.setTyping?.(chatJid, false);
+  await channel.setTyping?.(chatJid, false, selectedThreadId);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -458,6 +496,7 @@ async function runAgent(
       status: t.status,
       next_run: t.next_run,
     })),
+    threadId,
   );
 
   // Update available groups snapshot (main group only can see all groups)
@@ -467,6 +506,7 @@ async function runAgent(
     isMain,
     availableGroups,
     new Set(Object.keys(registeredGroups)),
+    threadId,
   );
 
   // Wrap onOutput to track session ID from streamed results
@@ -490,6 +530,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        threadId,
       },
       (proc, containerName) =>
         queue.registerProcess(
@@ -620,12 +661,18 @@ async function startMessageLoop(): Promise<void> {
               MAX_MESSAGES_PER_PROMPT,
               threadId,
             );
-            const messagesToSend =
+            let messagesToSend =
               allPending.length > 0 ? allPending : threadMessages;
+            if (triggerPattern) {
+              messagesToSend = messagesToSend.map((m) => {
+                const stripped = m.content
+                  .trim()
+                  .replace(triggerPattern, '')
+                  .trim();
+                return stripped !== m.content ? { ...m, content: stripped } : m;
+              });
+            }
             const formatted = formatMessages(messagesToSend, TIMEZONE);
-
-            // Set thread context before piping/typing
-            channel.setThreadContext?.(chatJid, threadId);
 
             if (queue.sendMessage(chatJid, formatted, threadId)) {
               logger.debug(
@@ -636,7 +683,7 @@ async function startMessageLoop(): Promise<void> {
                 messagesToSend[messagesToSend.length - 1].timestamp;
               saveState();
               channel
-                .setTyping?.(chatJid, true)
+                .setTyping?.(chatJid, true, threadId)
                 ?.catch((err) =>
                   logger.warn(
                     { chatJid, err },
@@ -644,8 +691,8 @@ async function startMessageLoop(): Promise<void> {
                   ),
                 );
             } else {
-              // No active container or different thread — enqueue for processing
-              queue.enqueueMessageCheck(chatJid);
+              // No active container — enqueue for this specific thread
+              queue.enqueueMessageCheck(chatJid, threadId);
             }
           }
         }
@@ -669,12 +716,20 @@ function recoverPendingMessages(): void {
       ASSISTANT_NAME,
       MAX_MESSAGES_PER_PROMPT,
     );
-    if (pending.length > 0) {
-      logger.info(
-        { group: group.name, pendingCount: pending.length },
-        'Recovery: found unprocessed messages',
-      );
-      queue.enqueueMessageCheck(chatJid);
+    if (pending.length === 0) continue;
+
+    // Enqueue per-thread so each thread gets its own container
+    const byThread = groupByThread(pending);
+    for (const [threadId, msgs] of byThread) {
+      const tCursor = lastAgentTimestamp[cursorKey(chatJid, threadId)] || '';
+      const unprocessed = msgs.filter((m) => m.timestamp > tCursor);
+      if (unprocessed.length > 0) {
+        logger.info(
+          { group: group.name, threadId, pendingCount: unprocessed.length },
+          'Recovery: found unprocessed messages',
+        );
+        queue.enqueueMessageCheck(chatJid, threadId);
+      }
     }
   }
 }
@@ -733,19 +788,24 @@ async function main(): Promise<void> {
         process.cwd(),
       );
       if (result.ok) {
-        await channel.sendMessage(chatJid, result.url);
+        await channel.sendMessage(chatJid, result.url, msg.thread_id);
       } else {
         await channel.sendMessage(
           chatJid,
           `Remote Control failed: ${result.error}`,
+          msg.thread_id,
         );
       }
     } else {
       const result = stopRemoteControl();
       if (result.ok) {
-        await channel.sendMessage(chatJid, 'Remote Control session ended.');
+        await channel.sendMessage(
+          chatJid,
+          'Remote Control session ended.',
+          msg.thread_id,
+        );
       } else {
-        await channel.sendMessage(chatJid, result.error);
+        await channel.sendMessage(chatJid, result.error, msg.thread_id);
       }
     }
   }
@@ -797,6 +857,7 @@ async function main(): Promise<void> {
               had
                 ? 'Session cleared. Next message starts a fresh conversation.'
                 : 'No active session. Next message starts a fresh conversation.',
+              msg.thread_id,
             ).catch((err) =>
               logger.error({ err, chatJid }, '/clear reply error'),
             );
@@ -888,8 +949,8 @@ async function main(): Promise<void> {
       );
     },
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) =>
-      writeGroupsSnapshot(gf, im, ag, rj),
+    writeGroupsSnapshot: (gf, im, ag, rj, tid) =>
+      writeGroupsSnapshot(gf, im, ag, rj, tid),
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({

@@ -417,7 +417,11 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+  async setTyping(
+    jid: string,
+    isTyping: boolean,
+    _threadId?: string,
+  ): Promise<void> {
     if (!this.bot || !isTyping) return;
     try {
       const numericId = jid.replace(/^tg:/, '');

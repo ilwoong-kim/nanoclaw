@@ -42,3 +42,22 @@ export function resolveGroupIpcPath(folder: string): string {
   ensureWithinBase(ipcBaseDir, ipcPath);
   return ipcPath;
 }
+
+export function resolveThreadIpcPath(
+  folder: string,
+  threadId?: string,
+): string {
+  assertValidGroupFolder(folder);
+  const ipcBaseDir = path.resolve(DATA_DIR, 'ipc');
+  const threadSlug = threadId || '_default';
+  if (
+    threadSlug.includes('/') ||
+    threadSlug.includes('\\') ||
+    threadSlug.includes('..')
+  ) {
+    throw new Error(`Invalid thread ID: ${threadSlug}`);
+  }
+  const ipcPath = path.resolve(ipcBaseDir, folder, threadSlug);
+  ensureWithinBase(ipcBaseDir, ipcPath);
+  return ipcPath;
+}

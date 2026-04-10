@@ -203,9 +203,14 @@ export class SlackChannel implements Channel {
     await this.syncChannelMetadata();
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(
+    jid: string,
+    text: string,
+    threadId?: string,
+  ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
-    const threadTs = this.activeThreadTs.get(jid);
+    const threadTs = threadId || this.activeThreadTs.get(jid);
+    const placeholderKey = threadTs ? `${jid}:${threadTs}` : jid;
 
     if (!this.connected) {
       this.outgoingQueue.push({ jid, text, threadTs });
@@ -217,26 +222,22 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      const placeholderTs = this.placeholderTs.get(jid);
+      const placeholderTs = this.placeholderTs.get(placeholderKey);
 
       if (placeholderTs && text.length <= MAX_MESSAGE_LENGTH) {
-        // Replace the placeholder with the first response chunk.
-        // chat.update keeps the message in its original thread, so no thread_ts needed.
-        this.placeholderTs.delete(jid);
+        this.placeholderTs.delete(placeholderKey);
         await this.app.client.chat.update({
           channel: channelId,
           ts: placeholderTs,
           text,
         });
       } else {
-        // If placeholder was used, delete it before sending split messages
         if (placeholderTs) {
-          this.placeholderTs.delete(jid);
+          this.placeholderTs.delete(placeholderKey);
           await this.app.client.chat
             .delete({ channel: channelId, ts: placeholderTs })
             .catch(() => {});
         }
-        // Slack limits messages to ~4000 characters; split if needed
         if (text.length <= MAX_MESSAGE_LENGTH) {
           await this.app.client.chat.postMessage({
             channel: channelId,
@@ -255,7 +256,7 @@ export class SlackChannel implements Channel {
       }
       logger.info({ jid, length: text.length, threadTs }, 'Slack message sent');
     } catch (err) {
-      this.placeholderTs.delete(jid);
+      this.placeholderTs.delete(placeholderKey);
       this.outgoingQueue.push({ jid, text, threadTs });
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
@@ -285,9 +286,14 @@ export class SlackChannel implements Channel {
     await this.app.stop();
   }
 
-  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+  async setTyping(
+    jid: string,
+    isTyping: boolean,
+    threadId?: string,
+  ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
-    const threadTs = this.activeThreadTs.get(jid);
+    const threadTs = threadId || this.activeThreadTs.get(jid);
+    const placeholderKey = threadTs ? `${jid}:${threadTs}` : jid;
     if (isTyping) {
       try {
         const res = await this.app.client.chat.postMessage({
@@ -295,15 +301,14 @@ export class SlackChannel implements Channel {
           text: ':meat_on_bone::dash: ゴムゴムの〜 ...',
           ...(threadTs && { thread_ts: threadTs }),
         });
-        if (res.ts) this.placeholderTs.set(jid, res.ts);
+        if (res.ts) this.placeholderTs.set(placeholderKey, res.ts);
       } catch (err) {
         logger.debug({ jid, err }, 'Failed to post Slack placeholder');
       }
     } else {
-      // Clean up placeholder if it was never replaced by sendMessage
-      const ts = this.placeholderTs.get(jid);
+      const ts = this.placeholderTs.get(placeholderKey);
       if (ts) {
-        this.placeholderTs.delete(jid);
+        this.placeholderTs.delete(placeholderKey);
         try {
           await this.app.client.chat.delete({ channel: channelId, ts });
         } catch {

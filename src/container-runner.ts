@@ -17,7 +17,10 @@ import {
   TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  resolveGroupFolderPath,
+  resolveThreadIpcPath,
+} from './group-folder.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_RUNTIME_BIN,
@@ -44,6 +47,7 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  threadId?: string;
 }
 
 export interface ContainerOutput {
@@ -62,6 +66,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  threadId?: string,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -185,14 +190,14 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Per-group IPC namespace: each group gets its own IPC directory
-  // This prevents cross-group privilege escalation via IPC
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
-  fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  // Per-thread IPC namespace: each thread gets its own IPC directory
+  // This prevents cross-group privilege escalation and cross-thread IPC collisions
+  const threadIpcDir = resolveThreadIpcPath(group.folder, threadId);
+  fs.mkdirSync(path.join(threadIpcDir, 'messages'), { recursive: true });
+  fs.mkdirSync(path.join(threadIpcDir, 'tasks'), { recursive: true });
+  fs.mkdirSync(path.join(threadIpcDir, 'input'), { recursive: true });
   mounts.push({
-    hostPath: groupIpcDir,
+    hostPath: threadIpcDir,
     containerPath: '/workspace/ipc',
     readonly: false,
   });
@@ -346,9 +351,12 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, input.threadId);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  const threadSlug = input.threadId
+    ? `-t${input.threadId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}`
+    : '';
+  const containerName = `nanoclaw-${safeName}${threadSlug}-${Date.now()}`;
   // Main group uses the default OneCLI agent; others use their own agent.
   const agentIdentifier = input.isMain
     ? undefined
@@ -744,17 +752,18 @@ export function writeTasksSnapshot(
     status: string;
     next_run: string | null;
   }>,
+  threadId?: string,
 ): void {
-  // Write filtered tasks to the group's IPC directory
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
+  // Write filtered tasks to the thread's IPC directory
+  const ipcDir = resolveThreadIpcPath(groupFolder, threadId);
+  fs.mkdirSync(ipcDir, { recursive: true });
 
   // Main sees all tasks, others only see their own
   const filteredTasks = isMain
     ? tasks
     : tasks.filter((t) => t.groupFolder === groupFolder);
 
-  const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
+  const tasksFile = path.join(ipcDir, 'current_tasks.json');
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
@@ -775,14 +784,15 @@ export function writeGroupsSnapshot(
   isMain: boolean,
   groups: AvailableGroup[],
   _registeredJids: Set<string>,
+  threadId?: string,
 ): void {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
+  const ipcDir = resolveThreadIpcPath(groupFolder, threadId);
+  fs.mkdirSync(ipcDir, { recursive: true });
 
   // Main sees all groups; others see nothing (they can't activate groups)
   const visibleGroups = isMain ? groups : [];
 
-  const groupsFile = path.join(groupIpcDir, 'available_groups.json');
+  const groupsFile = path.join(ipcDir, 'available_groups.json');
   fs.writeFileSync(
     groupsFile,
     JSON.stringify(

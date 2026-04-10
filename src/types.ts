@@ -87,12 +87,12 @@ export interface TaskRunLog {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(jid: string, text: string, threadId?: string): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
-  setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  setTyping?(jid: string, isTyping: boolean, threadId?: string): Promise<void>;
   // Optional: set active thread context for threaded channels (e.g., Slack).
   // Called before sendMessage/setTyping so responses go to the correct thread.
   setThreadContext?(jid: string, threadId: string | undefined): void;

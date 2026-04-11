@@ -23,6 +23,77 @@ import {
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
 
+interface SlackFileRef {
+  id: string;
+  name?: string;
+  mimetype?: string;
+  url_private_download?: string;
+}
+
+// Binary document formats requiring extraction tooling inside the container.
+// PDF uses the agent's native Read tool (page-to-image rendering); docx/pptx
+// go through pandoc. Legacy .doc / .ppt are intentionally excluded — pandoc
+// does not parse them.
+interface BinaryDocFormat {
+  mime: string;
+  ext: string;
+  label: string;
+  tool: (containerPath: string) => string;
+}
+
+const READ_TOOL = (p: string) => `Read tool on ${p}`;
+const PANDOC_PLAIN = (p: string) => `pandoc -t plain ${p}`;
+
+const BINARY_DOC_FORMATS: BinaryDocFormat[] = [
+  { mime: 'application/pdf', ext: '.pdf', label: 'PDF', tool: READ_TOOL },
+  {
+    mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ext: '.docx',
+    label: 'DOCX',
+    tool: PANDOC_PLAIN,
+  },
+  {
+    mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    ext: '.pptx',
+    label: 'PPTX',
+    tool: PANDOC_PLAIN,
+  },
+];
+
+const BINARY_DOC_BY_MIME = new Map(BINARY_DOC_FORMATS.map((f) => [f.mime, f]));
+
+// Text files fall through to the Read tool — no extra metadata needed.
+const TEXT_FILE_EXT = /\.(txt|md|markdown|csv|log|rst|tsv)$/i;
+
+function lookupBinaryDocFormat(
+  mime: string | undefined,
+  filename: string | undefined,
+): BinaryDocFormat | undefined {
+  if (mime && BINARY_DOC_BY_MIME.has(mime)) return BINARY_DOC_BY_MIME.get(mime);
+  if (!filename) return undefined;
+  const lower = filename.toLowerCase();
+  return BINARY_DOC_FORMATS.find((f) => lower.endsWith(f.ext));
+}
+
+function isSupportedDocument(file: SlackFileRef): boolean {
+  if (file.mimetype?.startsWith('text/')) return true;
+  if (lookupBinaryDocFormat(file.mimetype, file.name)) return true;
+  if (file.name && TEXT_FILE_EXT.test(file.name)) return true;
+  return false;
+}
+
+function formatDocumentHint(
+  mime: string | undefined,
+  containerPath: string,
+  filename: string,
+): string {
+  const format = lookupBinaryDocFormat(mime, filename);
+  if (format) {
+    return `[${format.label}: ${filename}]\nUse: ${format.tool(containerPath)}`;
+  }
+  return `[TXT: ${filename}]\nUse: ${READ_TOOL(containerPath)}`;
+}
+
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
 // (BotMessageEvent, subtype 'bot_message') so we can track our own output.
@@ -113,20 +184,14 @@ export class SlackChannel implements Channel {
       // After filtering, event is either GenericMessageEvent or BotMessageEvent
       const msg = event as HandledMessageEvent;
 
-      // Extract image files from file_share events
-      const files = (msg as any).files as
-        | Array<{
-            id: string;
-            name?: string;
-            mimetype?: string;
-            url_private_download?: string;
-          }>
-        | undefined;
+      // Extract file attachments from file_share events
+      const files = (msg as any).files as SlackFileRef[] | undefined;
       const imageFiles =
         files?.filter((f) => f.mimetype?.startsWith('image/')) ?? [];
+      const docFiles = files?.filter(isSupportedDocument) ?? [];
 
-      // Allow through if there's text OR image files
-      if (!msg.text && imageFiles.length === 0) return;
+      // Allow through if there's text OR image files OR document files
+      if (!msg.text && imageFiles.length === 0 && docFiles.length === 0) return;
 
       const jid = `slack:${msg.channel}`;
       const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
@@ -221,16 +286,31 @@ export class SlackChannel implements Channel {
         }
       }
 
-      // Download and process image files
+      // Download images and documents in parallel — independent work on
+      // disjoint file sets so we don't pay serial latency when both exist.
       let images: ImageAttachment[] | undefined;
-      if (imageFiles.length > 0 && !isBotMessage) {
-        const group = groups[jid];
-        if (group) {
-          images = await this.processSlackImages(imageFiles, group.folder);
-          // Add image references to text content for fallback
-          for (const img of images) {
+      const group =
+        !isBotMessage && (imageFiles.length > 0 || docFiles.length > 0)
+          ? groups[jid]
+          : undefined;
+      if (group) {
+        const [imagesResult, docHints] = await Promise.all([
+          imageFiles.length > 0
+            ? this.processSlackImages(imageFiles, group.folder)
+            : Promise.resolve<ImageAttachment[]>([]),
+          docFiles.length > 0
+            ? this.processSlackDocuments(docFiles, group.folder)
+            : Promise.resolve<string[]>([]),
+        ]);
+        if (imagesResult.length > 0) {
+          images = imagesResult;
+          for (const img of imagesResult) {
             content += ` [Image: ${img.filename}] (${img.path})`;
           }
+        }
+        if (docHints.length > 0) {
+          const docBlock = docHints.join('\n\n');
+          content = content ? `${content}\n\n${docBlock}` : docBlock;
         }
       }
 
@@ -591,7 +671,9 @@ export class SlackChannel implements Channel {
       const attachDir = path.join(groupDir, 'attachments');
       fs.mkdirSync(attachDir, { recursive: true });
 
-      const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+      // Keep unicode letters/digits (Hangul etc.) but strip shell metas so
+      // the agent can use the path in Bash without quoting.
+      const safeName = filename.replace(/[^\p{L}\p{N}._-]/gu, '_');
       const destPath = path.join(attachDir, safeName);
 
       // Prefer user token for file downloads — bot tokens often get HTML login pages
@@ -632,15 +714,71 @@ export class SlackChannel implements Channel {
   }
 
   /**
+   * Resolve the download URL for a Slack file. Falls back to `files.info`
+   * when the inline `url_private_download` is absent (Slack sometimes omits
+   * it on the initial file_share event and only populates it after the upload
+   * settles). Returns null on API failure or if still unavailable.
+   */
+  private async resolveSlackFileDownloadUrl(
+    file: SlackFileRef,
+  ): Promise<string | null> {
+    if (file.url_private_download) return file.url_private_download;
+    try {
+      const info = await this.app.client.files.info({ file: file.id });
+      return (info.file as any)?.url_private_download ?? null;
+    } catch (err) {
+      logger.warn(
+        { fileId: file.id, err },
+        'Failed to resolve Slack file download URL',
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Download Slack document attachments and return inline hint lines for the
+   * agent. Documents are saved to attachments/ and referenced by path in the
+   * message text — the agent decides when to read them (lazy extraction).
+   */
+  private async processSlackDocuments(
+    docFiles: SlackFileRef[],
+    groupFolder: string,
+  ): Promise<string[]> {
+    return Promise.all(
+      docFiles.map(async (file) => {
+        const downloadUrl = await this.resolveSlackFileDownloadUrl(file);
+        if (!downloadUrl) {
+          return `[File: ${file.name ?? file.id}] (download failed)`;
+        }
+
+        // Fall back to a format-derived extension so pandoc can detect the
+        // format even when Slack omits the filename.
+        const fallbackExt =
+          lookupBinaryDocFormat(file.mimetype, file.name)?.ext ?? '';
+        const filename = file.name ?? `slack_doc_${file.id}${fallbackExt}`;
+        const downloaded = await this.downloadSlackFile(
+          downloadUrl,
+          groupFolder,
+          filename,
+        );
+        if (!downloaded) {
+          return `[File: ${filename}] (download failed)`;
+        }
+
+        return formatDocumentHint(
+          file.mimetype,
+          downloaded.containerPath,
+          filename,
+        );
+      }),
+    );
+  }
+
+  /**
    * Download and process Slack image files for vision.
    */
   private async processSlackImages(
-    imageFiles: Array<{
-      id: string;
-      name?: string;
-      mimetype?: string;
-      url_private_download?: string;
-    }>,
+    imageFiles: SlackFileRef[],
     groupFolder: string,
   ): Promise<ImageAttachment[]> {
     const groupDir = resolveGroupFolderPath(groupFolder);
@@ -648,19 +786,7 @@ export class SlackChannel implements Channel {
 
     const settled = await Promise.all(
       imageFiles.map(async (file): Promise<ImageAttachment | null> => {
-        let downloadUrl = file.url_private_download;
-        if (!downloadUrl) {
-          try {
-            const info = await this.app.client.files.info({ file: file.id });
-            downloadUrl = (info.file as any)?.url_private_download;
-          } catch (err) {
-            logger.warn(
-              { fileId: file.id, err },
-              'Failed to get Slack file info',
-            );
-            return null;
-          }
-        }
+        const downloadUrl = await this.resolveSlackFileDownloadUrl(file);
         if (!downloadUrl) return null;
 
         const filename =

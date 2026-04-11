@@ -26,6 +26,30 @@ vi.mock('../db.js', () => ({
   updateChatName: vi.fn(),
 }));
 
+// Mock group folder resolver (used by downloadSlackFile)
+vi.mock('../group-folder.js', () => ({
+  resolveGroupFolderPath: vi.fn(() => '/fake/groups/test-channel'),
+}));
+
+// Mock image processing (used by processSlackImages)
+vi.mock('../image.js', () => ({
+  processImage: vi.fn(async () => null),
+}));
+
+// Mock fs so downloadSlackFile doesn't touch the real filesystem
+vi.mock('fs', () => ({
+  default: {
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    existsSync: vi.fn(() => false),
+    readFileSync: vi.fn(),
+  },
+  mkdirSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  existsSync: vi.fn(() => false),
+  readFileSync: vi.fn(),
+}));
+
 // --- @slack/bolt mock ---
 
 type Handler = (...args: any[]) => any;
@@ -116,6 +140,12 @@ function createMessageEvent(overrides: {
   threadTs?: string;
   subtype?: string;
   botId?: string;
+  files?: Array<{
+    id: string;
+    name?: string;
+    mimetype?: string;
+    url_private_download?: string;
+  }>;
 }) {
   return {
     channel: overrides.channel ?? 'C0123456789',
@@ -126,6 +156,7 @@ function createMessageEvent(overrides: {
     thread_ts: overrides.threadTs,
     subtype: overrides.subtype,
     bot_id: overrides.botId,
+    files: overrides.files,
   };
 }
 
@@ -855,6 +886,315 @@ describe('SlackChannel', () => {
     it('has name "slack"', () => {
       const channel = new SlackChannel(createTestOpts());
       expect(channel.name).toBe('slack');
+    });
+  });
+
+  // --- Document attachments ---
+
+  describe('document attachments', () => {
+    // Default fetch mock: any download succeeds with a small binary payload.
+    // Individual tests override for failure/edge cases.
+    function mockDownloadResponse(contentType = 'application/pdf') {
+      return {
+        ok: true,
+        status: 200,
+        headers: {
+          get: (name: string) => (name === 'content-type' ? contentType : null),
+        },
+        arrayBuffer: async () => new ArrayBuffer(16),
+      };
+    }
+
+    beforeEach(() => {
+      (global as any).fetch = vi.fn().mockResolvedValue(mockDownloadResponse());
+    });
+
+    function fileShareEvent(
+      files: Array<{
+        id: string;
+        name?: string;
+        mimetype?: string;
+        url_private_download?: string;
+      }>,
+      textOverride?: string,
+    ) {
+      return createMessageEvent({
+        text: textOverride,
+        subtype: 'file_share',
+        files,
+      });
+    }
+
+    function deliveredContent(opts: SlackChannelOpts): string {
+      const call = (opts.onMessage as any).mock.calls[0];
+      expect(call).toBeDefined();
+      return call[1].content as string;
+    }
+
+    it('passes the gate for a bare PDF upload with no caption (R1 fix)', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent(
+          [
+            {
+              id: 'F1',
+              name: 'report.pdf',
+              mimetype: 'application/pdf',
+              url_private_download: 'https://files.slack/download/report.pdf',
+            },
+          ],
+          undefined,
+        ),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalled();
+      const content = deliveredContent(opts);
+      expect(content).toContain('[PDF: report.pdf]');
+      expect(content).toContain(
+        'Use: Read tool on /workspace/group/attachments/report.pdf',
+      );
+      // No leading newline when caption is empty
+      expect(content.startsWith('\n')).toBe(false);
+    });
+
+    it('produces pandoc hint for .docx attachments', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent(
+          [
+            {
+              id: 'F2',
+              name: 'memo.docx',
+              mimetype:
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              url_private_download: 'https://files.slack/download/memo.docx',
+            },
+          ],
+          'please summarize',
+        ),
+      );
+
+      const content = deliveredContent(opts);
+      expect(content).toContain('please summarize');
+      expect(content).toContain('[DOCX: memo.docx]');
+      expect(content).toContain(
+        'Use: pandoc -t plain /workspace/group/attachments/memo.docx',
+      );
+    });
+
+    it('produces pandoc hint for .pptx attachments', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F3',
+            name: 'deck.pptx',
+            mimetype:
+              'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url_private_download: 'https://files.slack/download/deck.pptx',
+          },
+        ]),
+      );
+
+      const content = deliveredContent(opts);
+      expect(content).toContain('[PPTX: deck.pptx]');
+      expect(content).toContain(
+        'Use: pandoc -t plain /workspace/group/attachments/deck.pptx',
+      );
+    });
+
+    it('accepts text/markdown via text/* broad match', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F4',
+            name: 'notes.md',
+            mimetype: 'text/markdown',
+            url_private_download: 'https://files.slack/download/notes.md',
+          },
+        ]),
+      );
+
+      const content = deliveredContent(opts);
+      expect(content).toContain('[TXT: notes.md]');
+      expect(content).toContain(
+        'Use: Read tool on /workspace/group/attachments/notes.md',
+      );
+    });
+
+    it('accepts text/plain', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F5',
+            name: 'log.txt',
+            mimetype: 'text/plain',
+            url_private_download: 'https://files.slack/download/log.txt',
+          },
+        ]),
+      );
+
+      expect(deliveredContent(opts)).toContain('[TXT: log.txt]');
+    });
+
+    it('falls back to extension when MIME is application/octet-stream', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F6',
+            name: 'mystery.pdf',
+            mimetype: 'application/octet-stream',
+            url_private_download: 'https://files.slack/download/mystery.pdf',
+          },
+        ]),
+      );
+
+      expect(deliveredContent(opts)).toContain('[PDF: mystery.pdf]');
+    });
+
+    it('ignores unsupported MIME types like application/zip', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent(
+          [
+            {
+              id: 'F7',
+              name: 'archive.zip',
+              mimetype: 'application/zip',
+              url_private_download: 'https://files.slack/download/archive.zip',
+            },
+          ],
+          'here you go',
+        ),
+      );
+
+      const content = deliveredContent(opts);
+      // zip is not downloaded — no hint added
+      expect(content).toBe('here you go');
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('emits a download-failed hint when fetch returns error', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      (global as any).fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        headers: { get: () => 'text/html' },
+        arrayBuffer: async () => new ArrayBuffer(0),
+      });
+
+      await triggerMessageEvent(
+        fileShareEvent(
+          [
+            {
+              id: 'F8',
+              name: 'locked.pdf',
+              mimetype: 'application/pdf',
+              url_private_download: 'https://files.slack/download/locked.pdf',
+            },
+          ],
+          undefined,
+        ),
+      );
+
+      // The message still reaches the agent (not dropped), but hint shows failure
+      expect(opts.onMessage).toHaveBeenCalled();
+      const content = deliveredContent(opts);
+      expect(content).toContain('locked.pdf');
+      expect(content).toContain('download failed');
+    });
+
+    it('skips document processing for bot messages', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent({
+        ...fileShareEvent([
+          {
+            id: 'F9',
+            name: 'bot-upload.pdf',
+            mimetype: 'application/pdf',
+            url_private_download: 'https://files.slack/download/bot-upload.pdf',
+          },
+        ]),
+        subtype: 'bot_message',
+        bot_id: 'B_SOME_BOT',
+      });
+
+      // Bot file uploads must not trigger download (prevents recursion)
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('preserves unicode filename (Korean)', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F10',
+            name: '보고서_2026_4월.pdf',
+            mimetype: 'application/pdf',
+            url_private_download: 'https://files.slack/download/report.pdf',
+          },
+        ]),
+      );
+
+      const content = deliveredContent(opts);
+      expect(content).toContain('보고서_2026_4월.pdf');
+      expect(content).toContain(
+        '/workspace/group/attachments/보고서_2026_4월.pdf',
+      );
+    });
+
+    it('fills pandoc extension when filename is missing', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        fileShareEvent([
+          {
+            id: 'F11',
+            mimetype:
+              'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            url_private_download: 'https://files.slack/download/anon',
+          },
+        ]),
+      );
+
+      const content = deliveredContent(opts);
+      // Fallback name ends with .docx so pandoc can detect format
+      expect(content).toMatch(/slack_doc_F11\.docx/);
     });
   });
 });

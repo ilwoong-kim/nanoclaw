@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     python3 \
+    pandoc \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser

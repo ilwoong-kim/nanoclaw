@@ -50,13 +50,28 @@ server.tool(
       .describe(
         'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
       ),
+    threadId: z
+      .string()
+      .optional()
+      .describe(
+        'Thread ID to reply to (e.g. Slack thread_ts). When set, the message is posted as a reply in that thread.',
+      ),
+    targetJid: z
+      .string()
+      .optional()
+      .describe(
+        'Send to a different registered group/channel (main group only). E.g. "slack:C0123456789" to post in a Slack channel.',
+      ),
   },
   async (args) => {
+    const targetJid = isMain && args.targetJid ? args.targetJid : chatJid;
+
     const data: Record<string, string | undefined> = {
       type: 'message',
-      chatJid,
+      chatJid: targetJid,
       text: args.text,
-      sender: args.sender || undefined,
+      sender: args.sender,
+      threadId: args.threadId,
       groupFolder,
       timestamp: new Date().toISOString(),
     };

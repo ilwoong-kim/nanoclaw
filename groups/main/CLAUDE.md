@@ -90,11 +90,72 @@ Main has read-only access to the project, read-write access to the store (SQLite
 | `/workspace/project` | Project root | read-only |
 | `/workspace/project/store` | `store/` | read-write |
 | `/workspace/group` | `groups/main/` | read-write |
+| `/workspace/extra/repos` | `quantit-repo/` | read-write |
 
 Key paths inside the container:
 - `/workspace/project/store/messages.db` - SQLite database (read-write)
 - `/workspace/project/store/messages.db` (registered_groups table) - Group config
 - `/workspace/project/groups/` - All group folders
+
+---
+
+## Local Code Exploration
+
+코드 아키텍처 분석, 구현 추적, 파일 간 패턴 검색 등 **깊은 코드 탐색**이 필요하면 로컬에 clone된 레포를 직접 탐색한다. GitHub API skill은 이슈, PR, 릴리즈, Actions 등 메타데이터 작업에 사용한다.
+
+### 사용 구분
+
+| 목적 | 도구 |
+|------|------|
+| 이슈, PR, 릴리즈, Actions, 알림, 코드 검색 | GitHub API skill |
+| 아키텍처 이해, 구현 추적, 파일 간 패턴 검색, 디버깅 | 로컬 레포 탐색 (Grep, Read, Glob) |
+
+### 디렉토리 구조
+
+```
+/workspace/extra/repos/
+├── arkraft/          ← arkraft-* 레포 + ai-infra
+│   ├── arkraft-api/
+│   ├── arkraft-web/
+│   ├── ai-infra/
+│   └── ...
+├── {service-name}/   ← 같은 서비스의 여러 레포를 그룹핑
+│   └── ...
+└── etc/              ← 어디에도 속하지 않는 단독 레포
+```
+
+### 카테고리 판단 규칙
+
+새 레포를 clone할 때 적절한 카테고리 디렉토리를 판단한다:
+
+1. **기존 카테고리 확인**: `ls /workspace/extra/repos/`로 이미 존재하는 카테고리 확인
+2. **레포 이름 prefix 매칭**: 공통 prefix가 있으면 해당 카테고리에 배치 (예: `arkraft-api` → `arkraft/`)
+3. **같은 서비스 판단**: 같은 서비스/프로덕트의 여러 레포가 있으면 서비스명으로 카테고리 생성 (레포 이름, description 종합 판단)
+4. **단독 레포**: 어느 그룹에도 속하지 않으면 `etc/`에 배치
+5. **기존 카테고리 우선**: 새로 만들기 전에 기존 카테고리에 맞는지 먼저 확인
+
+### 워크플로우
+
+1. 존재 확인: `ls /workspace/extra/repos/{category}/{repo}`
+2. 있으면 최신화:
+   ```bash
+   git -C /workspace/extra/repos/{category}/{repo} fetch origin && \
+   git -C /workspace/extra/repos/{category}/{repo} reset --hard origin/$(git -C /workspace/extra/repos/{category}/{repo} symbolic-ref --short HEAD)
+   ```
+3. 없으면 clone:
+   ```bash
+   mkdir -p /workspace/extra/repos/{category} && \
+   git clone https://x-access-token:$GITHUB_TOKEN@github.com/{owner}/{repo}.git /workspace/extra/repos/{category}/{repo}
+   ```
+4. Grep, Read, Glob으로 탐색
+5. 실패 시: pull 실패 → 삭제 후 재clone / clone 실패 → GitHub API skill로 fallback
+
+### 안전 규칙
+
+- **읽기 전용**: clone된 레포에 commit, push, 브랜치 생성, 파일 수정/생성 금지
+- **필요한 것만 clone**: 사용자가 요청한 레포만 clone. 선제적으로 전체 레포를 clone하지 않음
+- **`gh` CLI 없음**: 컨테이너에 `gh` 미설치. `git` 명령어 + `$GITHUB_TOKEN` 사용
+- **`.env` 파일 주의**: clone된 레포 내 `.env` 파일 내용을 사용자에게 노출하지 않음
 
 ---
 

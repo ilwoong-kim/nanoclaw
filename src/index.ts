@@ -545,6 +545,7 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
         threadId,
         imagePaths,
+        model: group.containerConfig?.model,
       },
       (proc, containerName) =>
         queue.registerProcess(

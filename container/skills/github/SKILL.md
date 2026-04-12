@@ -20,6 +20,12 @@ Use this skill's Python script for all GitHub operations. Web browsing may fail 
 ### Explicit triggers
 User mentions GitHub, repo, issue, PR, pull request, merge, release, actions, workflow, CI, gist, 깃허브, 이슈, 릴리즈
 
+### Deep Code Exploration
+
+GitHub API는 이슈, PR, Actions, commit history 등 메타데이터 조회에 최적화되어 있다.
+코드 아키텍처 분석, 구현 추적, 파일 간 패턴 검색 등 **깊은 코드 탐색**이 필요하면
+로컬에 clone된 레포를 직접 탐색하라. `/workspace/extra/repos/` 참조.
+
 ## Credentials
 
 `GITHUB_TOKEN` is injected via environment variable by the host. No setup needed inside the container.

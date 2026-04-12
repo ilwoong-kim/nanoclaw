@@ -35,6 +35,7 @@ interface ContainerInput {
   assistantName?: string;
   script?: string;
   imagePaths?: string[];
+  model?: string;
 }
 
 interface ContainerOutput {
@@ -70,6 +71,7 @@ interface SDKUserMessage {
   session_id: string;
 }
 
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
@@ -548,7 +550,7 @@ async function runQuery(
     prompt: stream,
     options: {
       cwd: '/workspace/group',
-      model: 'claude-sonnet-4-6',
+      model: containerInput.model || DEFAULT_MODEL,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,

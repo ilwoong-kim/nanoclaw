@@ -50,6 +50,7 @@ export interface ContainerInput {
   script?: string;
   threadId?: string;
   imagePaths?: string[];
+  model?: string;
 }
 
 export interface ContainerOutput {

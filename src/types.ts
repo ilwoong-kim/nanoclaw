@@ -30,6 +30,7 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  model?: string; // Claude model ID (e.g. 'claude-sonnet-4-6', 'claude-opus-4-6')
 }
 
 export interface RegisteredGroup {
@@ -73,6 +74,7 @@ export interface ScheduledTask {
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
   context_mode: 'group' | 'isolated';
+  model?: string | null; // Claude model override for this task
   next_run: string | null;
   last_run: string | null;
   last_result: string | null;

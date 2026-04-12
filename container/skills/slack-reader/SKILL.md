@@ -11,7 +11,11 @@ description: >
 
 # Slack Reader (Read-Only)
 
-Read-only access to the Slack workspace. **Do NOT send, edit, or delete messages.** This skill is for reading only.
+Read-only access to the Slack workspace. Write methods are blocked at the code level and will fail with an error.
+
+When you need to send a message to a Slack channel:
+- **Always use the `send_message` tool** — this sends messages as Luffy-Bot (Bot identity)
+- **Never use `slack.py chat.postMessage`** — this is blocked and would incorrectly send as the owner's personal account
 
 ## Credentials
 

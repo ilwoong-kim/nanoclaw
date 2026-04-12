@@ -13,9 +13,9 @@ As CLI:
 Examples:
     python slack.py conversations.list types=public_channel,private_channel --paginate channels
     python slack.py conversations.history channel=C12345 limit=20 --paginate messages
-    python slack.py chat.postMessage channel=C12345 text="Hello world"
     python slack.py users.info user=U12345
-    python slack.py reactions.add channel=C12345 name=thumbsup timestamp=1234567890.123456
+    python slack.py conversations.info channel=C12345
+    python slack.py auth.test
 
 Environment:
     SLACK_USER_TOKEN  - Slack User OAuth Token (xoxp-...)
@@ -62,6 +62,12 @@ _GET_METHODS = frozenset({
     "usergroups.users.list",
 })
 
+# All methods callable through this script. Write methods are blocked.
+# To send messages, use the send_message IPC tool instead.
+_ALLOWED_METHODS = _GET_METHODS | frozenset({
+    "auth.test",
+})
+
 
 def _request(url, headers, data=None, method="POST"):
     """Send a single HTTP request and return parsed JSON. Handles 429."""
@@ -96,6 +102,14 @@ def api_call(method, paginate_key=None, **params):
     """
     if not TOKEN:
         print("Error: SLACK_USER_TOKEN environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+
+    if method not in _ALLOWED_METHODS:
+        print(
+            f"Error: '{method}' is blocked — this tool is read-only.\n"
+            f"To send a message, use the send_message tool instead.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     use_get = method in _GET_METHODS

@@ -70,7 +70,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
               ) {
                 await deps.sendMessage(data.chatJid, data.text, data.threadId);
                 logger.info(
-                  { chatJid: data.chatJid, sourceGroup, ...(data.threadId && { threadId: data.threadId }) },
+                  {
+                    chatJid: data.chatJid,
+                    sourceGroup,
+                    ...(data.threadId && { threadId: data.threadId }),
+                  },
                   'IPC message sent',
                 );
               } else {

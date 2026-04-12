@@ -31,6 +31,13 @@ vi.mock('../group-folder.js', () => ({
   ),
 }));
 
+// Mock image processing (used by photo handler after download)
+vi.mock('../image.js', () => ({
+  processImage: vi.fn().mockResolvedValue(null),
+  detectMimeType: vi.fn(() => 'image/jpeg'),
+  MAX_IMAGES_PER_BATCH: 5,
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;

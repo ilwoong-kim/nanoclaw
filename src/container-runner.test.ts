@@ -6,17 +6,21 @@ import { PassThrough } from 'stream';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-// Mock config
-vi.mock('./config.js', () => ({
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
-  CONTAINER_MAX_OUTPUT_SIZE: 10485760,
-  CONTAINER_TIMEOUT: 1800000, // 30min
-  DATA_DIR: '/tmp/nanoclaw-test-data',
-  GROUPS_DIR: '/tmp/nanoclaw-test-groups',
-  IDLE_TIMEOUT: 1800000, // 30min
-  ONECLI_URL: 'http://localhost:10254',
-  TIMEZONE: 'America/Los_Angeles',
-}));
+// Mock config — use importOriginal so new exports don't break the mock
+vi.mock('./config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./config.js')>();
+  return {
+    ...actual,
+    CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+    CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+    CONTAINER_TIMEOUT: 1800000, // 30min
+    DATA_DIR: '/tmp/nanoclaw-test-data',
+    GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+    IDLE_TIMEOUT: 1800000, // 30min
+    ONECLI_URL: 'http://localhost:10254',
+    TIMEZONE: 'America/Los_Angeles',
+  };
+});
 
 // Mock logger
 vi.mock('./logger.js', () => ({

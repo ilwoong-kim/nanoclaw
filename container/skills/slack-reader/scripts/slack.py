@@ -3,6 +3,10 @@
 Slack Web API caller with automatic cursor-based pagination and rate-limit handling.
 Uses only Python stdlib (no external dependencies).
 
+Read methods use SLACK_USER_TOKEN (personal scope), write methods use
+SLACK_BOT_TOKEN (Luffy-Bot identity).  Token selection is enforced at the
+code level — callers cannot override it.
+
 As a module:
     from slack import api_call
     result = api_call("conversations.list", paginate_key="channels", types="public_channel")
@@ -14,11 +18,12 @@ Examples:
     python slack.py conversations.list types=public_channel,private_channel --paginate channels
     python slack.py conversations.history channel=C12345 limit=20 --paginate messages
     python slack.py users.info user=U12345
-    python slack.py conversations.info channel=C12345
+    python slack.py reactions.add channel=C12345 name=thumbsup timestamp=1234567890.123456
     python slack.py auth.test
 
 Environment:
-    SLACK_USER_TOKEN  - Slack User OAuth Token (xoxp-...)
+    SLACK_USER_TOKEN  - Slack User OAuth Token (xoxp-...) for read operations
+    SLACK_BOT_TOKEN   - Slack Bot OAuth Token (xoxb-...) for write operations
 """
 
 import json
@@ -30,7 +35,8 @@ import urllib.parse
 import urllib.request
 
 
-TOKEN = os.environ.get("SLACK_USER_TOKEN", "")
+USER_TOKEN = os.environ.get("SLACK_USER_TOKEN", "")
+BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 BASE_URL = "https://slack.com/api"
 
 # Slack API methods that only accept GET with query parameters.
@@ -62,11 +68,76 @@ _GET_METHODS = frozenset({
     "usergroups.users.list",
 })
 
-# All methods callable through this script. Write methods are blocked.
-# To send messages, use the send_message IPC tool instead.
-_ALLOWED_METHODS = _GET_METHODS | frozenset({
+# Read methods — always use User Token (personal scope).
+_READ_METHODS = _GET_METHODS | frozenset({
     "auth.test",
 })
+
+# Write methods — always use Bot Token (Luffy-Bot identity).
+_WRITE_METHODS = frozenset({
+    # Messages
+    "chat.postMessage",
+    "chat.update",
+    "chat.delete",
+    "chat.postEphemeral",
+    # Reactions
+    "reactions.add",
+    "reactions.remove",
+    # Pins
+    "pins.add",
+    "pins.remove",
+    # Bookmarks
+    "bookmarks.add",
+    "bookmarks.edit",
+    "bookmarks.remove",
+    # Channel management
+    "conversations.invite",
+    "conversations.kick",
+    "conversations.setPurpose",
+    "conversations.setTopic",
+    "conversations.open",
+    "conversations.close",
+    "conversations.archive",
+    "conversations.unarchive",
+    # Reminders
+    "reminders.add",
+    "reminders.delete",
+    "reminders.complete",
+})
+
+_ALLOWED_METHODS = _READ_METHODS | _WRITE_METHODS
+
+
+def _token_for(method):
+    """Return the correct token for the given method.
+
+    Write methods → BOT_TOKEN (enforced), read methods → USER_TOKEN (preferred).
+    This function is the single enforcement point — callers cannot choose a token.
+    """
+    if method in _WRITE_METHODS:
+        if not BOT_TOKEN:
+            print(
+                f"Error: SLACK_BOT_TOKEN is required for write method '{method}'.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return BOT_TOKEN
+    # Read method
+    if USER_TOKEN:
+        return USER_TOKEN
+    if BOT_TOKEN:
+        print(
+            f"Warning: SLACK_USER_TOKEN not set, falling back to BOT_TOKEN "
+            f"for read method '{method}'. Some methods (e.g. search) may not work.",
+            file=sys.stderr,
+        )
+        return BOT_TOKEN
+    print(
+        "Error: SLACK_USER_TOKEN (or SLACK_BOT_TOKEN as fallback) "
+        "is required for read operations.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def _request(url, headers, data=None, method="POST"):
@@ -100,18 +171,14 @@ def api_call(method, paginate_key=None, **params):
         The JSON response dict. If paginate_key is used, the specified key
         contains all collected items across pages.
     """
-    if not TOKEN:
-        print("Error: SLACK_USER_TOKEN environment variable is not set.", file=sys.stderr)
-        sys.exit(1)
-
     if method not in _ALLOWED_METHODS:
         print(
-            f"Error: '{method}' is blocked — this tool is read-only.\n"
-            f"To send a message, use the send_message tool instead.",
+            f"Error: '{method}' is not a supported method.",
             file=sys.stderr,
         )
         sys.exit(1)
 
+    token = _token_for(method)
     use_get = method in _GET_METHODS
     all_items = []
     cursor = None
@@ -124,20 +191,25 @@ def api_call(method, paginate_key=None, **params):
         if use_get:
             qs = urllib.parse.urlencode(call_params)
             url = f"{BASE_URL}/{method}?{qs}" if qs else f"{BASE_URL}/{method}"
-            headers = {"Authorization": f"Bearer {TOKEN}"}
+            headers = {"Authorization": f"Bearer {token}"}
             result = _request(url, headers, method="GET")
         else:
             url = f"{BASE_URL}/{method}"
             headers = {
-                "Authorization": f"Bearer {TOKEN}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json; charset=utf-8",
             }
             data = json.dumps(call_params).encode("utf-8")
             result = _request(url, headers, data=data, method="POST")
 
         if not result.get("ok"):
-            # Fallback: if POST failed with invalid_arguments, retry as GET
-            if not use_get and result.get("error") == "invalid_arguments":
+            # Fallback: if POST failed with invalid_arguments, retry as GET.
+            # Only for read methods — write methods must always use POST.
+            if (
+                not use_get
+                and method not in _WRITE_METHODS
+                and result.get("error") == "invalid_arguments"
+            ):
                 use_get = True
                 continue
             print(json.dumps(result, indent=2, ensure_ascii=False))

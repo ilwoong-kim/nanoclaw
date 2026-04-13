@@ -303,10 +303,14 @@ async function buildContainerArgs(
     args.push('-e', `ATLASSIAN_API_TOKEN=${atlassianEnv.ATLASSIAN_API_TOKEN}`);
   }
 
-  // Forward Slack user token for the slack-reader container skill.
-  const slackUserEnv = readEnvFile(['SLACK_USER_TOKEN']);
-  if (slackUserEnv.SLACK_USER_TOKEN) {
-    args.push('-e', `SLACK_USER_TOKEN=${slackUserEnv.SLACK_USER_TOKEN}`);
+  // Forward Slack tokens for the slack-reader container skill.
+  // User token → read operations, Bot token → write operations.
+  const slackEnv = readEnvFile(['SLACK_USER_TOKEN', 'SLACK_BOT_TOKEN']);
+  if (slackEnv.SLACK_USER_TOKEN) {
+    args.push('-e', `SLACK_USER_TOKEN=${slackEnv.SLACK_USER_TOKEN}`);
+  }
+  if (slackEnv.SLACK_BOT_TOKEN) {
+    args.push('-e', `SLACK_BOT_TOKEN=${slackEnv.SLACK_BOT_TOKEN}`);
   }
 
   // Forward GitHub token for the github container skill.

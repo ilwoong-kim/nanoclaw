@@ -21,12 +21,7 @@ Collects work context from Slack, Jira, GitHub and writes structured summaries t
 
 ## Owner Identity
 
-| Field | Value |
-|-------|-------|
-| Name | 김일웅 (ilwoong.kim) |
-| Slack User ID | `U01QGDBGJRF` |
-| Atlassian Account ID | `6040590ac58c72007140a156` |
-| GitHub Username | `ilwoong-kim` |
+See the Owner Identity table in global CLAUDE.md (auto-loaded into context).
 
 ## Script Locations
 
@@ -213,21 +208,11 @@ rm $VAULT/daily/YYYY-MM-DD.md  # each day Mon through Sat
 
 ---
 
-## Slack Channel IDs
-
-| Channel | ID | Daily | Weekly |
-|---------|-----|-------|--------|
-| amt_team | `C0891E6DDPA` | ✓ | (from daily) |
-| project_ark | `C0933M2A5CK` | ✓ | (from daily) |
-| ark_team | `C08E8QTPQP9` | | ✓ |
-| 기술연구소 | `C0233GCAK6V` | | ✓ |
-| project_finter | `C03HKQ8AJ8Z` | | ✓ |
-
 ## Tier System
 
-- **Tier 1 (상세)** — 나를 멘션한 것, 내가 쓴 것, 내 PR/이슈
-- **Tier 2 (요약)** — 팀 채널 주요 공지/결정, @amt 멘션
-- **Tier 3 (한 줄)** — 회사 전체 공지, 기술연구소 동향
+- **Tier 1 (detailed)** — messages mentioning me, messages I sent, my PRs/issues
+- **Tier 2 (summary)** — key announcements/decisions in team channels, @amt mentions
+- **Tier 3 (one-liner)** — company-wide announcements, tech research lab trends
 
 ## Frontmatter — projects Field
 
@@ -237,21 +222,21 @@ Use **project names**, not repo names. Repos like arkraft-api, arkraft-web, arkr
 |-------------|----------|
 | `arkraft` | arkraft-api, arkraft-web, arkraft-wiki, arkraft-deploy, arkraft-agent-*, arkraft-sdk, ai-infra |
 | `alpha-pool` | alpha-pool-infra |
-| `signal-finder` | signal finder 관련 작업 |
-| `moneytoring` | ark-moneytoring-agent, DIP 관련 |
-| `finter` | finter, finterlabs, c2api 관련 |
+| `signal-finder` | signal finder related work |
+| `moneytoring` | ark-moneytoring-agent, DIP related |
+| `finter` | finter, finterlabs, c2api related |
 | `distilling` | arkraft-agent-distilling, arkraft-agent-extract |
 
 ## Frontmatter — people Field
 
-이름만 적고 "님" 접미사는 생략: `재현`, `동현` (not `재현님`, `동현님`)
+Use first names only, omit honorific suffixes: `재현`, `동현` (not `재현님`, `동현님`)
 
 ## Key Conventions
 
 - Korean for content, English for technical terms
 - Skip bot messages (USLACKBOT, B0493CDTL0M etc.) and routine reminders
-- People names: 이름만 (e.g., 재현님, 동현님) — no full names or IDs in body
+- People names: first name only (e.g., 재현, 동현) — no full names or IDs in body
 - Jira issue keys as-is (e.g., ARK-1234)
 - GitHub PR references: repo#number (e.g., arkraft-api #500)
 - Dates in ISO format (YYYY-MM-DD)
-- If a section has no content, omit the section entirely rather than writing "없음"
+- If a section has no content, omit the section entirely rather than writing "none"

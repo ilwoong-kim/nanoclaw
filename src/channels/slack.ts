@@ -218,9 +218,7 @@ export class SlackChannel implements Channel {
       // Pre-resolve unique user names in parallel
       const uniqueUserIds = [
         ...new Set(
-          allMessages
-            .map((m) => m.user)
-            .filter((u): u is string => !!u),
+          allMessages.map((m) => m.user).filter((u): u is string => !!u),
         ),
       ];
       await Promise.all(uniqueUserIds.map((u) => this.resolveUserName(u)));
@@ -229,8 +227,7 @@ export class SlackChannel implements Channel {
         allMessages
           .filter((r) => r.text || r.ts)
           .map(async (reply) => {
-            const isBotMsg =
-              !!reply.bot_id || reply.user === this.botUserId;
+            const isBotMsg = !!reply.bot_id || reply.user === this.botUserId;
             const senderName = isBotMsg
               ? ASSISTANT_NAME
               : (reply.user

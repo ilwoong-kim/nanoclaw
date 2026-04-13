@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
-import { updateChatName } from '../db.js';
+import { updateChatName, backfillThreadMessages } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { processImage } from '../image.js';
@@ -64,6 +64,19 @@ const BINARY_DOC_BY_MIME = new Map(BINARY_DOC_FORMATS.map((f) => [f.mime, f]));
 
 // Text files fall through to the Read tool — no extra metadata needed.
 const TEXT_FILE_EXT = /\.(txt|md|markdown|csv|log|rst|tsv)$/i;
+
+/** Convert Slack ts (e.g. "1234567890.123456") to ISO 8601 timestamp */
+function slackTsToIso(ts: string): string {
+  return new Date(parseFloat(ts) * 1000).toISOString();
+}
+
+interface ThreadReplyMessage {
+  ts: string;
+  text?: string;
+  user?: string;
+  bot_id?: string;
+  thread_ts?: string;
+}
 
 function lookupBinaryDocFormat(
   mime: string | undefined,
@@ -132,6 +145,7 @@ export class SlackChannel implements Channel {
   private activeThreadTs = new Map<string, string>();
   /** Tracks last DM rejection time per user to avoid spamming the Slack API */
   private dmBlockLastNotified = new Map<string, number>();
+  private backfilledThreads = new Set<string>();
 
   private opts: SlackChannelOpts;
   private botToken: string;
@@ -171,6 +185,90 @@ export class SlackChannel implements Channel {
     this.setupEventHandlers();
   }
 
+  /**
+   * Backfill thread messages from Slack API into DB.
+   * Called when bot is first mentioned in an existing thread so the agent
+   * can see the full conversation context.
+   */
+  private async backfillThread(
+    channelId: string,
+    threadTs: string,
+    jid: string,
+  ): Promise<void> {
+    const key = `${channelId}:${threadTs}`;
+    if (this.backfilledThreads.has(key)) return;
+
+    try {
+      const allMessages: ThreadReplyMessage[] = [];
+      let cursor: string | undefined;
+      do {
+        const result = await this.app.client.conversations.replies({
+          token: this.botToken,
+          channel: channelId,
+          ts: threadTs,
+          limit: 200,
+          ...(cursor && { cursor }),
+        });
+        allMessages.push(
+          ...((result.messages as ThreadReplyMessage[] | undefined) || []),
+        );
+        cursor = result.response_metadata?.next_cursor || undefined;
+      } while (cursor);
+
+      // Pre-resolve unique user names in parallel
+      const uniqueUserIds = [
+        ...new Set(
+          allMessages
+            .map((m) => m.user)
+            .filter((u): u is string => !!u),
+        ),
+      ];
+      await Promise.all(uniqueUserIds.map((u) => this.resolveUserName(u)));
+
+      const prepared = await Promise.all(
+        allMessages
+          .filter((r) => r.text || r.ts)
+          .map(async (reply) => {
+            const isBotMsg =
+              !!reply.bot_id || reply.user === this.botUserId;
+            const senderName = isBotMsg
+              ? ASSISTANT_NAME
+              : (reply.user
+                  ? await this.resolveUserName(reply.user)
+                  : undefined) ||
+                reply.user ||
+                'unknown';
+            return {
+              id: reply.ts,
+              chat_jid: jid,
+              sender: reply.user || reply.bot_id || '',
+              sender_name: senderName,
+              content: reply.text || '',
+              timestamp: slackTsToIso(reply.ts),
+              is_from_me: isBotMsg,
+              is_bot_message: isBotMsg,
+              thread_id: threadTs,
+            };
+          }),
+      );
+
+      backfillThreadMessages(prepared, threadTs, jid, threadTs);
+
+      this.backfilledThreads.add(key);
+      if (this.backfilledThreads.size > 1000) this.backfilledThreads.clear();
+
+      logger.info(
+        { channelId, threadTs, count: allMessages.length },
+        'Backfilled thread messages from Slack API',
+      );
+    } catch (err) {
+      logger.warn(
+        { channelId, threadTs, err },
+        'Failed to backfill thread messages',
+      );
+    }
+  }
+
   private setupEventHandlers(): void {
     // Use app.event('message') instead of app.message() to capture all
     // message subtypes including bot_message (needed to track our own output)
@@ -194,7 +292,7 @@ export class SlackChannel implements Channel {
       if (!msg.text && imageFiles.length === 0 && docFiles.length === 0) return;
 
       const jid = `slack:${msg.channel}`;
-      const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
+      const timestamp = slackTsToIso(msg.ts);
       const isGroup = msg.channel_type !== 'im';
 
       // Always report metadata for group discovery
@@ -323,6 +421,11 @@ export class SlackChannel implements Channel {
         ? msg.thread_ts ||
           (isBotMentionedHere || isBotMessage ? msg.ts : undefined)
         : msg.thread_ts || msg.ts;
+
+      // Backfill thread context when bot is mentioned in an existing thread
+      if (isBotMentionedHere && msg.thread_ts && isGroup) {
+        await this.backfillThread(msg.channel, msg.thread_ts, jid);
+      }
 
       this.opts.onMessage(jid, {
         id: msg.ts,

@@ -331,21 +331,28 @@ export function storeMessage(msg: NewMessage): void {
 }
 
 /**
- * Store a message directly.
+ * Store a message with minimal fields.
+ * 'replace' (default) overwrites existing rows; 'ignore' skips them,
+ * preserving full fields (reply_to_*, image_paths) from storeMessage().
  */
-export function storeMessageDirect(msg: {
-  id: string;
-  chat_jid: string;
-  sender: string;
-  sender_name: string;
-  content: string;
-  timestamp: string;
-  is_from_me: boolean;
-  is_bot_message?: boolean;
-  thread_id?: string;
-}): void {
+export function storeMessageDirect(
+  msg: {
+    id: string;
+    chat_jid: string;
+    sender: string;
+    sender_name: string;
+    content: string;
+    timestamp: string;
+    is_from_me: boolean;
+    is_bot_message?: boolean;
+    thread_id?: string;
+  },
+  onConflict: 'replace' | 'ignore' = 'replace',
+): void {
+  const verb =
+    onConflict === 'ignore' ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `${verb} INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -357,6 +364,44 @@ export function storeMessageDirect(msg: {
     msg.is_bot_message ? 1 : 0,
     msg.thread_id ?? null,
   );
+}
+
+type DirectMessage = Parameters<typeof storeMessageDirect>[0];
+
+/**
+ * Backfill multiple messages in a single transaction.
+ * Uses INSERT OR IGNORE to preserve existing full-field rows, then fixes
+ * the parent message's thread_id (stored as NULL by the event handler).
+ */
+export function backfillThreadMessages(
+  messages: DirectMessage[],
+  parentId: string,
+  chatJid: string,
+  threadId: string,
+): void {
+  const insertStmt = db.prepare(
+    `INSERT OR IGNORE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const updateThreadId = db.prepare(
+    `UPDATE messages SET thread_id = ? WHERE id = ? AND chat_jid = ? AND thread_id IS NULL`,
+  );
+
+  db.transaction(() => {
+    for (const msg of messages) {
+      insertStmt.run(
+        msg.id,
+        msg.chat_jid,
+        msg.sender,
+        msg.sender_name,
+        msg.content,
+        msg.timestamp,
+        msg.is_from_me ? 1 : 0,
+        msg.is_bot_message ? 1 : 0,
+        msg.thread_id ?? null,
+      );
+    }
+    updateThreadId.run(threadId, parentId, chatJid);
+  })();
 }
 
 /** Reconstruct images array from DB image_paths JSON column */

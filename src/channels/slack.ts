@@ -316,11 +316,12 @@ export class SlackChannel implements Channel {
 
       // thread_id for session isolation:
       // - In a thread: msg.thread_ts (parent message ts)
-      // - Top-level bot mention in group: msg.ts (starts new thread)
+      // - Top-level bot mention or bot message in group: msg.ts (starts new thread)
       // - DM: msg.thread_ts || msg.ts (every message gets a thread)
       // - Non-mention group message outside thread: undefined
       const threadId = isGroup
-        ? msg.thread_ts || (isBotMentionedHere ? msg.ts : undefined)
+        ? msg.thread_ts ||
+          (isBotMentionedHere || isBotMessage ? msg.ts : undefined)
         : msg.thread_ts || msg.ts;
 
       this.opts.onMessage(jid, {

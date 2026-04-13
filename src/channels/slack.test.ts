@@ -516,6 +516,75 @@ describe('SlackChannel', () => {
     });
   });
 
+  // --- Bot message thread_id assignment ---
+
+  describe('bot message thread_id', () => {
+    it('assigns thread_id = msg.ts for top-level bot messages in groups', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = createMessageEvent({
+        ts: '1704067200.000100',
+        text: 'Cron task result',
+        subtype: 'bot_message',
+        botId: 'B_MY_BOT',
+      });
+      await triggerMessageEvent(event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          thread_id: '1704067200.000100',
+          is_bot_message: true,
+        }),
+      );
+    });
+
+    it('keeps thread_id = thread_ts for bot replies in threads', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = createMessageEvent({
+        ts: '1704067201.000000',
+        threadTs: '1704067200.000000',
+        text: 'Bot thread reply',
+        subtype: 'bot_message',
+        botId: 'B_MY_BOT',
+      });
+      await triggerMessageEvent(event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          thread_id: '1704067200.000000',
+          is_bot_message: true,
+        }),
+      );
+    });
+
+    it('leaves thread_id undefined for non-bot non-mention top-level messages', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = createMessageEvent({
+        ts: '1704067200.000000',
+        text: 'Regular message',
+        user: 'U_USER_456',
+      });
+      await triggerMessageEvent(event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          thread_id: undefined,
+        }),
+      );
+    });
+  });
+
   // --- @mention translation ---
 
   describe('@mention translation', () => {

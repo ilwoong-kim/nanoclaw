@@ -2,16 +2,17 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 
 import { logger } from './logger.js';
+import { expandPath } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
 const MAX_DEPTH = 3;
-const PULL_TIMEOUT_MS = 60_000;
+const PULL_TIMEOUT_MS = 30_000;
+const PULL_CONCURRENCY = 5;
 const SKIP_DIRS = new Set([
   'node_modules',
   '.git',
@@ -23,11 +24,6 @@ const SKIP_DIRS = new Set([
   '__pycache__',
   '.cache',
 ]);
-
-function expandPath(p: string): string {
-  if (p.startsWith('~')) return path.join(os.homedir(), p.slice(1));
-  return p;
-}
 
 function hasGitDir(entries: fs.Dirent[]): boolean {
   return entries.some((e) => e.name === '.git');
@@ -102,7 +98,10 @@ export async function pullRepo(repoPath: string): Promise<PullResult> {
   try {
     statusOut = await runGit(repoPath, ['status', '--porcelain']);
   } catch (err) {
-    return { status: 'failed', reason: `status: ${(err as Error).message.split('\n')[0]}` };
+    return {
+      status: 'failed',
+      reason: `status: ${(err as Error).message.split('\n')[0]}`,
+    };
   }
   if (statusOut) return { status: 'skipped', reason: 'dirty' };
 
@@ -153,33 +152,47 @@ async function runSync(
     let updated = 0;
     let skipped = 0;
     let failed = 0;
-    for (const repo of repos) {
-      const result = await pullRepo(repo);
-      switch (result.status) {
-        case 'updated':
-          updated++;
-          logger.info(
-            {
-              repo,
-              before: result.before.slice(0, 8),
-              after: result.after.slice(0, 8),
-            },
-            'Repo updated via pull',
-          );
-          break;
-        case 'up-to-date':
-          logger.debug({ repo }, 'Repo up-to-date');
-          break;
-        case 'skipped':
-          skipped++;
-          logger.debug({ repo, reason: result.reason }, 'Repo pull skipped');
-          break;
-        case 'failed':
-          failed++;
-          logger.warn({ repo, reason: result.reason }, 'Repo pull failed');
-          break;
+
+    let nextIdx = 0;
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const i = nextIdx++;
+        if (i >= repos.length) return;
+        const repo = repos[i];
+        const result = await pullRepo(repo);
+        switch (result.status) {
+          case 'updated':
+            updated++;
+            logger.info(
+              {
+                repo,
+                before: result.before.slice(0, 8),
+                after: result.after.slice(0, 8),
+              },
+              'Repo updated via pull',
+            );
+            break;
+          case 'up-to-date':
+            logger.debug({ repo }, 'Repo up-to-date');
+            break;
+          case 'skipped':
+            skipped++;
+            logger.debug({ repo, reason: result.reason }, 'Repo pull skipped');
+            break;
+          case 'failed':
+            failed++;
+            logger.warn({ repo, reason: result.reason }, 'Repo pull failed');
+            break;
+        }
       }
-    }
+    };
+
+    const workers = Array.from(
+      { length: Math.min(PULL_CONCURRENCY, repos.length) },
+      () => worker(),
+    );
+    await Promise.all(workers);
+
     logger.info(
       { total: repos.length, updated, skipped, failed },
       'Repo sync complete',
@@ -202,7 +215,7 @@ export function startRepoSync(
       logger.error({ err }, 'Scheduled repo sync failed'),
     );
   }, intervalMs);
-  syncTimer.unref?.();
+  syncTimer.unref();
 }
 
 export function stopRepoSync(): void {

@@ -63,6 +63,7 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import { startRepoSync, stopRepoSync } from './repo-sync.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -809,6 +810,7 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
   backfillSlackMounts();
+  startRepoSync(() => registeredGroups);
 
   // Ensure OneCLI agents exist for all registered groups.
   // Recovers from missed creates (e.g. OneCLI was down at registration time).
@@ -821,6 +823,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    stopRepoSync();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);

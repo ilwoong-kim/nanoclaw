@@ -89,15 +89,20 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+## Context Priority
+
+**Read the `<messages>` block first — end-to-end.** The thread body and replies in the current conversation are the highest-priority context. If the answer is already in the thread, quote/summarize it and stop. Do **not** call Obsidian, Atlassian, or web search in that case.
+
+If the thread context is insufficient and you are inside a Slack thread, use the `slack-reader` skill (`conversations.replies`, `read_history.py`, `search_messages.py`) to pull more of the same channel/thread history **before** reaching for Obsidian or external sources.
+
 ## Obsidian Usage
 
-The Obsidian vault contains the user's work journals, meeting notes, project notes, and research memos — key accumulated context. When answering questions, **search Obsidian first** to provide answers informed by the user's context and history.
+The Obsidian vault contains the user's work journals, meeting notes, project notes, and research memos. Obsidian is a **supplementary** source, not the first stop.
 
 ### Reading
-- When the user asks a question, search Obsidian (`mcp__obsidian__search`) and use relevant notes as context
-- Prioritize Obsidian notes for questions about projects, work, schedules, and decisions
-- If Obsidian alone is insufficient, combine with web search, Atlassian, etc.
-- Skip Obsidian search for simple general knowledge questions (e.g., "Python list comprehension syntax")
+- Consult Obsidian (`mcp__obsidian__search`) only when (1) the conversation context is insufficient AND (2) the question is about accumulated knowledge — past meetings, project decisions, personal notes, long-term schedules.
+- For questions that can be answered from the thread, from general knowledge, or from a quick web/API lookup: skip Obsidian.
+- Skip Obsidian search for simple general knowledge questions (e.g., "Python list comprehension syntax").
 
 ### Writing
 - When the owner asks to update, correct, or add information that belongs in an existing Obsidian note → update that note directly (don't create a workspace duplicate)

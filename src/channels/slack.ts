@@ -13,11 +13,31 @@ import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  ContainerConfig,
   ImageAttachment,
   OnInboundMessage,
   OnChatMetadata,
   RegisteredGroup,
 } from '../types.js';
+
+export function getSlackDefaultContainerConfig(): ContainerConfig | undefined {
+  const env = readEnvFile(['SLACK_DEFAULT_ADDITIONAL_MOUNTS']);
+  const raw =
+    process.env.SLACK_DEFAULT_ADDITIONAL_MOUNTS ||
+    env.SLACK_DEFAULT_ADDITIONAL_MOUNTS;
+  if (!raw) return undefined;
+  try {
+    const mounts = JSON.parse(raw);
+    if (!Array.isArray(mounts) || mounts.length === 0) return undefined;
+    return { additionalMounts: mounts };
+  } catch (err) {
+    logger.warn(
+      { err },
+      'SLACK_DEFAULT_ADDITIONAL_MOUNTS is set but not valid JSON; ignoring',
+    );
+    return undefined;
+  }
+}
 
 // Slack's chat.postMessage API limits text to ~4000 characters per call.
 // Messages exceeding this are split into sequential chunks.
@@ -347,6 +367,7 @@ export class SlackChannel implements Channel {
           added_at: new Date().toISOString(),
           requiresTrigger: !isDm,
           isMain: false,
+          containerConfig: getSlackDefaultContainerConfig(),
         });
         this.pendingRegistrations.delete(jid);
         logger.info(

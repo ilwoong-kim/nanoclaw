@@ -66,6 +66,7 @@ import {
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { getSlackDefaultContainerConfig } from './channels/slack.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -116,6 +117,41 @@ function loadState(): void {
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
   );
+}
+
+function backfillSlackMounts(): void {
+  const defaults = getSlackDefaultContainerConfig();
+  if (!defaults?.additionalMounts?.length) return;
+
+  let updatedCount = 0;
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (!jid.startsWith('slack:')) continue;
+    if (group.containerConfig?.additionalMounts !== undefined) continue;
+    try {
+      const updated: RegisteredGroup = {
+        ...group,
+        containerConfig: {
+          ...group.containerConfig,
+          additionalMounts: defaults.additionalMounts,
+        },
+      };
+      registeredGroups[jid] = updated;
+      setRegisteredGroup(jid, updated);
+      updatedCount++;
+      logger.debug({ jid }, 'Backfilled default mounts for Slack group');
+    } catch (err) {
+      logger.error(
+        { err, jid },
+        'Backfill failed for Slack group, continuing with others',
+      );
+    }
+  }
+  if (updatedCount > 0) {
+    logger.info(
+      { updatedCount },
+      'Backfilled Slack groups with default mounts',
+    );
+  }
 }
 
 // --- Thread-aware key helpers ---
@@ -772,6 +808,7 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+  backfillSlackMounts();
 
   // Ensure OneCLI agents exist for all registered groups.
   // Recovers from missed creates (e.g. OneCLI was down at registration time).

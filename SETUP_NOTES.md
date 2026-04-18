@@ -52,6 +52,8 @@
 빈 상태(`/Users/luffy/.config/nanoclaw/mount-allowlist.json`).
 컨테이너는 자기 그룹 폴더만 볼 수 있음. 외부 경로 추가하려면 그 파일 수정 후 서비스 재시작.
 
+Slack에서 자동 등록되는 그룹에 기본 마운트를 일괄 적용하려면 `.env`의 `SLACK_DEFAULT_ADDITIONAL_MOUNTS`에 JSON 배열을 넣는다 (예: quantit-repo 마운트). 시작 시 기존 Slack 그룹은 `additionalMounts`가 비어 있으면 backfill되고, 신규 Slack 자동등록에도 기본값으로 들어간다.
+
 ## 자주 쓰는 명령
 
 ```bash

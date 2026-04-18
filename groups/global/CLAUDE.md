@@ -55,6 +55,29 @@ When the user asks for "my mentions", "my PRs", "my issues", etc., use the ident
 - Schedule tasks to run later or on a recurring basis
 - Send messages back to the chat
 
+## Internal URL — Local Mirror Fallback
+
+When you see a URL for an internal/VPN-gated site that has a local mirror, read the mirror instead of calling WebFetch. This takes priority over WebFetch for the trigger URLs listed below.
+
+### wiki.arkraft.ai (arkraft-wiki)
+
+- **Trigger**: any `https://wiki.arkraft.ai/<PATH>` URL. The live site requires company VPN; your container has no VPN access and WebFetch will time out.
+- **URL normalization before converting**:
+  1. Strip query string (`?ref=slack` etc.) and fragment (`#section`).
+  2. URL-decode the path (`%20` → space, etc.).
+  3. Remove leading/trailing slashes on `<PATH>`.
+- **Path resolution** (try in order with `Read`, use the first that exists):
+  1. `/workspace/extra/repos/arkraft/arkraft-wiki/content/<PATH>/index.md`
+  2. `/workspace/extra/repos/arkraft/arkraft-wiki/content/<PATH>/_index.md` (Hugo section index convention)
+  3. `/workspace/extra/repos/arkraft/arkraft-wiki/content/<PATH>.md`
+  4. Root case: if `<PATH>` is empty, try `content/index.md` then `content/_index.md`.
+- **Mirror not mounted**: if `Read` fails on the base `/workspace/extra/repos/arkraft/arkraft-wiki/content/` path (directory missing), the mirror isn't mounted in this group — tell the user "arkraft-wiki 로컬 미러가 이 그룹에는 마운트돼 있지 않습니다." Do not fall back to WebFetch.
+- **Path not found in mirror**: if the directory exists but none of the candidate files do, reply "해당 경로가 로컬 미러에 없습니다 (tried: `<paths>`)." Do not fall back to WebFetch — it will time out.
+- Files may begin with YAML frontmatter (`---` block). Ignore it for summaries or treat it as metadata.
+- Cite the original `https://wiki.arkraft.ai/...` URL in your response; the local content is authoritative.
+
+This rule applies **only** to `wiki.arkraft.ai`. For all other URLs, normal WebFetch behavior.
+
 ## Atlassian Usage Rules
 
 When the user's question appears to be about internal company information, **do not answer from general knowledge — search Confluence QW space first**. Each company has different policies and procedures, so answers must be based on the internal wiki.

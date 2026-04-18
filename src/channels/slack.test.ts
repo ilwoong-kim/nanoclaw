@@ -106,7 +106,11 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { SlackChannel, SlackChannelOpts } from './slack.js';
+import {
+  SlackChannel,
+  SlackChannelOpts,
+  getSlackDefaultContainerConfig,
+} from './slack.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
 
@@ -1265,5 +1269,49 @@ describe('SlackChannel', () => {
       // Fallback name ends with .docx so pandoc can detect format
       expect(content).toMatch(/slack_doc_F11\.docx/);
     });
+  });
+});
+
+describe('getSlackDefaultContainerConfig', () => {
+  const ENV_KEY = 'SLACK_DEFAULT_ADDITIONAL_MOUNTS';
+  const originalValue = process.env[ENV_KEY];
+
+  afterEach(() => {
+    if (originalValue === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = originalValue;
+    vi.clearAllMocks();
+  });
+
+  it('returns undefined when env var is unset', () => {
+    delete process.env[ENV_KEY];
+    expect(getSlackDefaultContainerConfig()).toBeUndefined();
+  });
+
+  it('parses valid JSON array into additionalMounts', () => {
+    process.env[ENV_KEY] = JSON.stringify([
+      { hostPath: '/tmp/repo', containerPath: 'repo', readonly: false },
+    ]);
+    const config = getSlackDefaultContainerConfig();
+    expect(config).toEqual({
+      additionalMounts: [
+        { hostPath: '/tmp/repo', containerPath: 'repo', readonly: false },
+      ],
+    });
+  });
+
+  it('returns undefined when JSON array is empty', () => {
+    process.env[ENV_KEY] = '[]';
+    expect(getSlackDefaultContainerConfig()).toBeUndefined();
+  });
+
+  it('returns undefined and does not throw on malformed JSON', () => {
+    process.env[ENV_KEY] = '{not-json';
+    expect(() => getSlackDefaultContainerConfig()).not.toThrow();
+    expect(getSlackDefaultContainerConfig()).toBeUndefined();
+  });
+
+  it('returns undefined when JSON is not an array', () => {
+    process.env[ENV_KEY] = '{"hostPath":"/tmp/repo"}';
+    expect(getSlackDefaultContainerConfig()).toBeUndefined();
   });
 });

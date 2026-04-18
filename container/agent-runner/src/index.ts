@@ -71,7 +71,7 @@ interface SDKUserMessage {
   session_id: string;
 }
 
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_MODEL = 'claude-opus-4-7';
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
@@ -551,6 +551,11 @@ async function runQuery(
     options: {
       cwd: '/workspace/group',
       model: containerInput.model || DEFAULT_MODEL,
+      // SDK 0.2.113 mis-selects the musl variant inside our glibc debian-slim
+      // container ("exec: no such file or directory" from the ELF loader).
+      // Pin the glibc variant explicitly until upstream fixes libc detection.
+      pathToClaudeCodeExecutable:
+        '/app/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,

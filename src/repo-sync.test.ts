@@ -39,9 +39,7 @@ describe('collectRepoPaths', () => {
 
   it('returns empty array when no groups have mounts', () => {
     expect(collectRepoPaths({})).toEqual([]);
-    expect(
-      collectRepoPaths({ g: groupWithMounts([]) }),
-    ).toEqual([]);
+    expect(collectRepoPaths({ g: groupWithMounts([]) })).toEqual([]);
   });
 
   it('discovers a repo when the mount root is itself a git repo', () => {
